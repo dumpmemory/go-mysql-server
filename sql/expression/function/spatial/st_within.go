@@ -25,7 +25,7 @@ import (
 
 // Within is a function that true if left is spatially within right
 type Within struct {
-	expression.BinaryExpression
+	expression.BinaryExpressionStub
 }
 
 var _ sql.FunctionExpression = (*Within)(nil)
@@ -34,9 +34,9 @@ var _ sql.CollationCoercible = (*Within)(nil)
 // NewWithin creates a new Within expression.
 func NewWithin(g1, g2 sql.Expression) sql.Expression {
 	return &Within{
-		expression.BinaryExpression{
-			Left:  g1,
-			Right: g2,
+		expression.BinaryExpressionStub{
+			LeftChild:  g1,
+			RightChild: g2,
 		},
 	}
 }
@@ -62,7 +62,7 @@ func (*Within) CollationCoercibility(ctx *sql.Context) (collation sql.CollationI
 }
 
 func (w *Within) String() string {
-	return fmt.Sprintf("%s(%s,%s)", w.FunctionName(), w.Left, w.Right)
+	return fmt.Sprintf("%s(%s,%s)", w.FunctionName(), w.LeftChild, w.RightChild)
 }
 
 // WithChildren implements the Expression interface.
@@ -209,7 +209,6 @@ func isPointWithin(p types.Point, g types.GeometryValue) bool {
 	return false
 }
 
-// TODO: consider parallelization
 func isWithin(g1, g2 types.GeometryValue) bool {
 	switch g1 := g1.(type) {
 	case types.Point:
@@ -222,16 +221,16 @@ func isWithin(g1, g2 types.GeometryValue) bool {
 	case types.GeomColl:
 		// TODO (james): implement these
 	}
-	return true
+	return false
 }
 
 // Eval implements the sql.Expression interface.
 func (w *Within) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	geom1, err := w.Left.Eval(ctx, row)
+	geom1, err := w.LeftChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
-	geom2, err := w.Right.Eval(ctx, row)
+	geom2, err := w.RightChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}

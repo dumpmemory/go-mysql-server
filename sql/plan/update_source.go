@@ -47,6 +47,10 @@ func (u *UpdateSource) Expressions() []sql.Expression {
 	return u.UpdateExprs
 }
 
+func (u *UpdateSource) IsReadOnly() bool {
+	return true
+}
+
 // WithExpressions implements the sql.Expressioner interface.
 func (u *UpdateSource) WithExpressions(newExprs ...sql.Expression) (sql.Node, error) {
 	if len(newExprs) != len(u.UpdateExprs) {
@@ -95,41 +99,7 @@ func (u *UpdateSource) DebugString() string {
 	return pr.String()
 }
 
-type updateSourceIter struct {
-	childIter   sql.RowIter
-	updateExprs []sql.Expression
-	tableSchema sql.Schema
-	ignore      bool
-}
-
-func (u *updateSourceIter) Next(ctx *sql.Context) (sql.Row, error) {
-	oldRow, err := u.childIter.Next(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	newRow, err := applyUpdateExpressionsWithIgnore(ctx, u.updateExprs, u.tableSchema, oldRow, u.ignore)
-	if err != nil {
-		return nil, err
-	}
-
-	// Reduce the row to the length of the schema. The length can differ when some update values come from an outer
-	// scope, which will be the first N values in the row.
-	// TODO: handle this in the analyzer instead?
-	expectedSchemaLen := len(u.tableSchema)
-	if expectedSchemaLen < len(oldRow) {
-		oldRow = oldRow[len(oldRow)-expectedSchemaLen:]
-		newRow = newRow[len(newRow)-expectedSchemaLen:]
-	}
-
-	return oldRow.Append(newRow), nil
-}
-
-func (u *updateSourceIter) Close(ctx *sql.Context) error {
-	return u.childIter.Close(ctx)
-}
-
-func (u *UpdateSource) getChildSchema() (sql.Schema, error) {
+func (u *UpdateSource) GetChildSchema() (sql.Schema, error) {
 	if nodeHasJoin(u.Child) {
 		return u.Child.Schema(), nil
 	}
@@ -157,35 +127,11 @@ func nodeHasJoin(node sql.Node) bool {
 	return hasJoinNode
 }
 
-func (u *UpdateSource) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	rowIter, err := u.Child.RowIter(ctx, row)
-	if err != nil {
-		return nil, err
-	}
-
-	schema, err := u.getChildSchema()
-	if err != nil {
-		return nil, err
-	}
-
-	return &updateSourceIter{
-		childIter:   rowIter,
-		updateExprs: u.UpdateExprs,
-		tableSchema: schema,
-		ignore:      u.Ignore,
-	}, nil
-}
-
 func (u *UpdateSource) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 1 {
 		return nil, sql.ErrInvalidChildrenNumber.New(u, len(children), 1)
 	}
 	return NewUpdateSource(children[0], u.Ignore, u.UpdateExprs), nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (u *UpdateSource) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return u.Child.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

@@ -17,27 +17,45 @@ package sql
 import (
 	"fmt"
 	"runtime"
+	"sync"
 
-	"github.com/cespare/xxhash"
+	"github.com/cespare/xxhash/v2"
 
 	lru "github.com/hashicorp/golang-lru"
-	errors "gopkg.in/src-d/go-errors.v1"
 )
 
 // HashOf returns a hash of the given value to be used as key in a cache.
 func HashOf(v Row) (uint64, error) {
-	hash := xxhash.New()
-	for _, x := range v {
+	hash := digestPool.Get().(*xxhash.Digest)
+	hash.Reset()
+	defer digestPool.Put(hash)
+	for i, x := range v {
+		if i > 0 {
+			// separate each value in the row with a nil byte
+			if _, err := hash.Write([]byte{0}); err != nil {
+				return 0, err
+			}
+		}
+
 		// TODO: probably much faster to do this with a type switch
-		if _, err := hash.Write([]byte(fmt.Sprintf("%v,", x))); err != nil {
+		// TODO: we don't have the type info necessary to appropriately encode the value of a string with a non-standard
+		//  collation, which means that two strings that differ only in their collations will hash to the same value.
+		//  See rowexec/grouping_key()
+		if _, err := fmt.Fprintf(hash, "%v,", x); err != nil {
 			return 0, err
 		}
 	}
 	return hash.Sum64(), nil
 }
 
+var digestPool = sync.Pool{
+	New: func() any {
+		return xxhash.New()
+	},
+}
+
 // ErrKeyNotFound is returned when the key could not be found in the cache.
-var ErrKeyNotFound = errors.NewKind("memory: key %d not found in cache")
+var ErrKeyNotFound = fmt.Errorf("memory: key not found in cache")
 
 type lruCache struct {
 	memory   Freeable
@@ -65,7 +83,7 @@ func (l *lruCache) Put(k uint64, v interface{}) error {
 func (l *lruCache) Get(k uint64) (interface{}, error) {
 	v, ok := l.cache.Get(k)
 	if !ok {
-		return nil, ErrKeyNotFound.New(k)
+		return nil, ErrKeyNotFound
 	}
 
 	return v, nil
@@ -133,7 +151,7 @@ func (m mapCache) Put(u uint64, i interface{}) error {
 func (m mapCache) Get(u uint64) (interface{}, error) {
 	v, ok := m.cache[u]
 	if !ok {
-		return nil, ErrKeyNotFound.New(u)
+		return nil, ErrKeyNotFound
 	}
 	return v, nil
 }
@@ -173,7 +191,7 @@ func (h *historyCache) Put(k uint64, v interface{}) error {
 func (h *historyCache) Get(k uint64) (interface{}, error) {
 	v, ok := h.cache[k]
 	if !ok {
-		return nil, ErrKeyNotFound.New(k)
+		return nil, ErrKeyNotFound
 	}
 	return v, nil
 }

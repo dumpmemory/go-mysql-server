@@ -16,7 +16,7 @@ package queries
 
 import (
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/analyzer"
+	"github.com/dolthub/go-mysql-server/sql/analyzer/analyzererrors"
 )
 
 var OrderByGroupByScriptTests = []ScriptTest{
@@ -82,6 +82,38 @@ var OrderByGroupByScriptTests = []ScriptTest{
 				// https://github.com/dolthub/dolt/issues/4723
 				Query:    "SELECT id, (SELECT -1 as id having id < 10) as upper_team FROM members where id < 6;",
 				Expected: []sql.Row{{3, -1}, {4, -1}, {5, -1}},
+			},
+		},
+	},
+	{
+		Name: "Group by BINARY: https://github.com/dolthub/dolt/issues/6179",
+		SetUpScript: []string{
+			"create table t (s varchar(100));",
+			"insert into t values ('abc'), ('def');",
+			"create table t1 (b binary(3));",
+			"insert into t1 values ('abc'), ('abc'), ('def'), ('abc'), ('def');",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select binary s from t group by binary s order by binary s",
+				Expected: []sql.Row{
+					{[]uint8("abc")},
+					{[]uint8("def")},
+				},
+			},
+			{
+				Query: "select count(b), b from t1 group by b order by b",
+				Expected: []sql.Row{
+					{3, []uint8("abc")},
+					{2, []uint8("def")},
+				},
+			},
+			{
+				Query: "select binary s from t group by binary s order by s",
+				Expected: []sql.Row{
+					{[]uint8("abc")},
+					{[]uint8("def")},
+				},
 			},
 		},
 	},
@@ -201,13 +233,13 @@ var OrderByGroupByScriptTests = []ScriptTest{
 			{
 				Query: "select @@global.sql_mode",
 				Expected: []sql.Row{
-					{"STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY"},
+					{"NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"},
 				},
 			},
 			{
 				Query: "select @@session.sql_mode",
 				Expected: []sql.Row{
-					{"STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY"},
+					{"NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"},
 				},
 			},
 			{
@@ -234,18 +266,18 @@ var OrderByGroupByScriptTests = []ScriptTest{
 			{
 				Query: "select @@global.sql_mode",
 				Expected: []sql.Row{
-					{"STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY"},
+					{"NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"},
 				},
 			},
 			{
 				Query: "select @@session.sql_mode",
 				Expected: []sql.Row{
-					{"STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY"},
+					{"NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"},
 				},
 			},
 			{
 				Query:       "select id, team from members group by team",
-				ExpectedErr: analyzer.ErrValidationGroupBy,
+				ExpectedErr: analyzererrors.ErrValidationGroupBy,
 			},
 		},
 	},

@@ -27,11 +27,6 @@ func (transactionNode) Children() []sql.Node {
 	return nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (transactionNode) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return true
-}
-
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (*transactionNode) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	return sql.Collation_binary, 7
@@ -39,6 +34,10 @@ func (*transactionNode) CollationCoercibility(ctx *sql.Context) (collation sql.C
 
 // Resolved implements the sql.Node interface.
 func (transactionNode) Resolved() bool {
+	return true
+}
+
+func (transactionNode) IsReadOnly() bool {
 	return true
 }
 
@@ -51,7 +50,7 @@ func (transactionNode) Schema() sql.Schema {
 // doesn't have a transaction. Starting a transaction implicitly commits any in-progress one.
 type StartTransaction struct {
 	transactionNode
-	transChar sql.TransactionCharacteristic
+	TransChar sql.TransactionCharacteristic
 }
 
 var _ sql.Node = (*StartTransaction)(nil)
@@ -60,7 +59,7 @@ var _ sql.CollationCoercible = (*StartTransaction)(nil)
 // NewStartTransaction creates a new StartTransaction node.
 func NewStartTransaction(transactionChar sql.TransactionCharacteristic) *StartTransaction {
 	return &StartTransaction{
-		transChar: transactionChar,
+		TransChar: transactionChar,
 	}
 }
 
@@ -82,7 +81,7 @@ func (s *StartTransaction) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, 
 		}
 	}
 
-	transaction, err := ts.StartTransaction(ctx, s.transChar)
+	transaction, err := ts.StartTransaction(ctx, s.TransChar)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +209,7 @@ func (r *Rollback) WithChildren(children ...sql.Node) (sql.Node, error) {
 // this is a no-op.
 type CreateSavepoint struct {
 	transactionNode
-	name string
+	Name string
 }
 
 var _ sql.Node = (*CreateSavepoint)(nil)
@@ -218,7 +217,7 @@ var _ sql.CollationCoercible = (*CreateSavepoint)(nil)
 
 // NewCreateSavepoint creates a new CreateSavepoint node.
 func NewCreateSavepoint(name string) *CreateSavepoint {
-	return &CreateSavepoint{name: name}
+	return &CreateSavepoint{Name: name}
 }
 
 // RowIter implements the sql.Node interface.
@@ -234,7 +233,7 @@ func (c *CreateSavepoint) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, err
 		return sql.RowsToRowIter(), nil
 	}
 
-	err := ts.CreateSavepoint(ctx, transaction, c.name)
+	err := ts.CreateSavepoint(ctx, transaction, c.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +241,7 @@ func (c *CreateSavepoint) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, err
 	return sql.RowsToRowIter(), nil
 }
 
-func (c *CreateSavepoint) String() string { return fmt.Sprintf("SAVEPOINT %s", c.name) }
+func (c *CreateSavepoint) String() string { return fmt.Sprintf("SAVEPOINT %s", c.Name) }
 
 // WithChildren implements the Node interface.
 func (c *CreateSavepoint) WithChildren(children ...sql.Node) (sql.Node, error) {
@@ -257,7 +256,7 @@ func (c *CreateSavepoint) WithChildren(children ...sql.Node) (sql.Node, error) {
 // sql.TransactionSession, this is a no-op.
 type RollbackSavepoint struct {
 	transactionNode
-	name string
+	Name string
 }
 
 var _ sql.Node = (*RollbackSavepoint)(nil)
@@ -266,7 +265,7 @@ var _ sql.CollationCoercible = (*RollbackSavepoint)(nil)
 // NewRollbackSavepoint creates a new RollbackSavepoint node.
 func NewRollbackSavepoint(name string) *RollbackSavepoint {
 	return &RollbackSavepoint{
-		name: name,
+		Name: name,
 	}
 }
 
@@ -283,7 +282,7 @@ func (r *RollbackSavepoint) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, e
 		return sql.RowsToRowIter(), nil
 	}
 
-	err := ts.RollbackToSavepoint(ctx, transaction, r.name)
+	err := ts.RollbackToSavepoint(ctx, transaction, r.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +290,7 @@ func (r *RollbackSavepoint) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, e
 	return sql.RowsToRowIter(), nil
 }
 
-func (r *RollbackSavepoint) String() string { return fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", r.name) }
+func (r *RollbackSavepoint) String() string { return fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", r.Name) }
 
 // WithChildren implements the Node interface.
 func (r *RollbackSavepoint) WithChildren(children ...sql.Node) (sql.Node, error) {
@@ -306,7 +305,7 @@ func (r *RollbackSavepoint) WithChildren(children ...sql.Node) (sql.Node, error)
 // no-op.
 type ReleaseSavepoint struct {
 	transactionNode
-	name string
+	Name string
 }
 
 var _ sql.Node = (*ReleaseSavepoint)(nil)
@@ -315,7 +314,7 @@ var _ sql.CollationCoercible = (*ReleaseSavepoint)(nil)
 // NewReleaseSavepoint creates a new ReleaseSavepoint node.
 func NewReleaseSavepoint(name string) *ReleaseSavepoint {
 	return &ReleaseSavepoint{
-		name: name,
+		Name: name,
 	}
 }
 
@@ -332,7 +331,7 @@ func (r *ReleaseSavepoint) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, er
 		return sql.RowsToRowIter(), nil
 	}
 
-	err := ts.ReleaseSavepoint(ctx, transaction, r.name)
+	err := ts.ReleaseSavepoint(ctx, transaction, r.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +339,7 @@ func (r *ReleaseSavepoint) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, er
 	return sql.RowsToRowIter(), nil
 }
 
-func (r *ReleaseSavepoint) String() string { return fmt.Sprintf("RELEASE SAVEPOINT %s", r.name) }
+func (r *ReleaseSavepoint) String() string { return fmt.Sprintf("RELEASE SAVEPOINT %s", r.Name) }
 
 // WithChildren implements the Node interface.
 func (r *ReleaseSavepoint) WithChildren(children ...sql.Node) (sql.Node, error) {

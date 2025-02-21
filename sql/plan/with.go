@@ -41,6 +41,10 @@ func NewWith(child sql.Node, ctes []*CommonTableExpression, recursive bool) *Wit
 	}
 }
 
+func (w *With) IsReadOnly() bool {
+	return w.Child.IsReadOnly()
+}
+
 func (w *With) String() string {
 	cteStrings := make([]string, len(w.CTEs))
 	for i, e := range w.CTEs {
@@ -79,11 +83,6 @@ func (w *With) WithChildren(children ...sql.Node) (sql.Node, error) {
 	}
 
 	return NewWith(children[0], w.CTEs, w.Recursive), nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (w *With) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return w.Child.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

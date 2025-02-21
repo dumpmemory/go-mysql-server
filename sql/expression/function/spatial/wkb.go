@@ -158,13 +158,6 @@ func ParseAxisOrder(s string) (bool, error) {
 	}
 }
 
-func ValidateSRID(srid uint32) error {
-	if srid != types.CartesianSRID && srid != types.GeoSpatialSRID {
-		return ErrInvalidSRID.New(srid)
-	}
-	return nil
-}
-
 // EvalGeomFromWKB takes in arguments for the ST_FROMWKB functions, and parses them to their corresponding geometry type
 func EvalGeomFromWKB(ctx *sql.Context, row sql.Row, exprs []sql.Expression, expectedGeomType int) (interface{}, error) {
 	val, err := exprs[0].Eval(ctx, row)
@@ -200,14 +193,14 @@ func EvalGeomFromWKB(ctx *sql.Context, row sql.Row, exprs []sql.Expression, expe
 		if s == nil {
 			return nil, nil
 		}
-		s, err = types.Uint32.Convert(s)
+		s, _, err = types.Int64.Convert(s)
 		if err != nil {
 			return nil, err
 		}
-		srid = s.(uint32)
-	}
-	if err = ValidateSRID(srid); err != nil {
-		return nil, err
+		if err = types.ValidateSRID(int(s.(int64)), "st_geomfromwkb"); err != nil {
+			return nil, err
+		}
+		srid = uint32(s.(int64))
 	}
 
 	var geom types.GeometryValue
@@ -273,7 +266,7 @@ var _ sql.CollationCoercible = (*PointFromWKB)(nil)
 
 // NewPointFromWKB creates a new point expression.
 func NewPointFromWKB(args ...sql.Expression) (sql.Expression, error) {
-	if len(args) < 1 && len(args) > 3 {
+	if len(args) < 1 || len(args) > 3 {
 		return nil, sql.ErrInvalidArgumentNumber.New("ST_POINTFROMWKB", "1, 2, or 3", len(args))
 	}
 	return &PointFromWKB{expression.NaryExpression{ChildExpressions: args}}, nil

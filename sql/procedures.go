@@ -26,6 +26,8 @@ type StoredProcedureDetails struct {
 	CreateStatement string    // The CREATE statement for this stored procedure.
 	CreatedAt       time.Time // The time that the stored procedure was created.
 	ModifiedAt      time.Time // The time of the last modification to the stored procedure.
+	SqlMode         string    // The SQL_MODE when this procedure was defined.
+	SchemaName      string    // The name of the schema that this stored procedure belongs to, for databases that support schemas.
 }
 
 // ExternalStoredProcedureDetails are the details of an external stored procedure. Compared to standard stored
@@ -62,6 +64,13 @@ type ExternalStoredProcedureDetails struct {
 	// to the usage of the integer-max for the parameter count, only one variadic function is allowed per function name.
 	// The type of the variadic parameter may not have a pointer type.
 	Function interface{}
+	// If true, the procedure is ReadOnly and can be run against a locked or read-only server.
+	ReadOnly bool
+	// If true, then this procedure's access control requires that the user must have explicit Execute permissions
+	// on the procedure in question. If false, then the user will be granted access to the procedure if they have Execute
+	// permissions on the DB. MySQL does not support anything like this, but it is useful for Dolt procedures which
+	// grant elevated access.
+	AdminOnly bool
 }
 
 // FakeCreateProcedureStmt returns a parseable CREATE PROCEDURE statement for this external stored procedure, as some

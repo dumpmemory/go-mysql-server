@@ -2,7 +2,6 @@ package plan
 
 import (
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -11,8 +10,8 @@ import (
 
 type AnalyzeTable struct {
 	Db     string
-	Stats  sql.StatsReadWriter
-	Tables []sql.DbTable
+	Stats  sql.StatsProvider
+	Tables []sql.Table
 }
 
 var _ sql.Node = (*AnalyzeTable)(nil)
@@ -25,7 +24,7 @@ var analyzeSchema = sql.Schema{
 	{Name: "Msg_text", Type: types.LongText},
 }
 
-func NewAnalyze(names []sql.DbTable) *AnalyzeTable {
+func NewAnalyze(names []sql.Table) *AnalyzeTable {
 	return &AnalyzeTable{
 		Tables: names,
 	}
@@ -39,11 +38,10 @@ func (n *AnalyzeTable) Schema() sql.Schema {
 
 func (n *AnalyzeTable) WithCatalog(cat sql.Catalog) *AnalyzeTable {
 	ret := *n
-	ret.Stats = ret.Stats.AssignCatalog(cat).(sql.StatsReadWriter)
 	return &ret
 }
 
-func (n *AnalyzeTable) WithTables(tables []sql.DbTable) *AnalyzeTable {
+func (n *AnalyzeTable) WithTables(tables []sql.Table) *AnalyzeTable {
 	n.Tables = tables
 	return n
 }
@@ -53,9 +51,13 @@ func (n *AnalyzeTable) WithDb(db string) *AnalyzeTable {
 	return n
 }
 
-func (n *AnalyzeTable) WithStats(stats sql.StatsReadWriter) *AnalyzeTable {
+func (n *AnalyzeTable) WithStats(stats sql.StatsProvider) *AnalyzeTable {
 	n.Stats = stats
 	return n
+}
+
+func (n *AnalyzeTable) IsReadOnly() bool {
+	return true
 }
 
 // String implements the interface sql.Node.
@@ -82,58 +84,7 @@ func (n *AnalyzeTable) WithChildren(_ ...sql.Node) (sql.Node, error) {
 	return n, nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (n *AnalyzeTable) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return true
-}
-
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (*AnalyzeTable) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	return sql.Collation_binary, 7
-}
-
-// RowIter implements the interface sql.Node.
-// TODO: support cross / multi db analyze
-func (n *AnalyzeTable) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	// Assume table is in current database
-	database := ctx.GetCurrentDatabase()
-	if database == "" {
-		return nil, sql.ErrNoDatabaseSelected.New()
-	}
-
-	return &analyzeTableIter{
-		idx:    0,
-		tables: n.Tables,
-		stats:  n.Stats,
-	}, nil
-}
-
-type analyzeTableIter struct {
-	idx    int
-	tables []sql.DbTable
-	stats  sql.StatsReadWriter
-}
-
-var _ sql.RowIter = &analyzeTableIter{}
-
-func (itr *analyzeTableIter) Next(ctx *sql.Context) (sql.Row, error) {
-	if itr.idx >= len(itr.tables) {
-		return nil, io.EOF
-	}
-
-	t := itr.tables[itr.idx]
-
-	msgType := "status"
-	msgText := "OK"
-	err := itr.stats.Analyze(ctx, t.Db, t.Table)
-	if err != nil {
-		msgType = "Error"
-		msgText = err.Error()
-	}
-	itr.idx++
-	return sql.Row{t.Table, "analyze", msgType, msgText}, nil
-}
-
-func (itr *analyzeTableIter) Close(ctx *sql.Context) error {
-	return nil
 }

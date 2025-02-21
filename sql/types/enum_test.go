@@ -137,7 +137,6 @@ func TestEnumConvert(t *testing.T) {
 		{[]string{"0", "1", "2"}, sql.Collation_Default, "2", "2", false},
 
 		{[]string{"one", "two"}, sql.Collation_Default, 3, nil, true},
-		{[]string{"one", "two"}, sql.Collation_Default, 0, nil, true},
 		{[]string{"one", "two"}, sql.Collation_Default, "three", nil, true},
 		{[]string{"one", "two"}, sql.Collation_Default, time.Date(2019, 12, 12, 12, 12, 12, 0, time.UTC), nil, true},
 	}
@@ -145,7 +144,7 @@ func TestEnumConvert(t *testing.T) {
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%v %v %v", test.vals, test.collation, test.val), func(t *testing.T) {
 			typ := MustCreateEnumType(test.vals, test.collation)
-			val, err := typ.Convert(test.val)
+			val, _, err := typ.Convert(test.val)
 			if test.expectedErr {
 				assert.Error(t, err)
 			} else {
@@ -199,7 +198,7 @@ func TestEnumZero(t *testing.T) {
 			typ := MustCreateEnumType(test.vals, sql.Collation_Default)
 			v, ok := typ.Zero().(uint16)
 			assert.True(t, ok)
-			assert.Equal(t, uint16(1), v)
+			assert.Equal(t, uint16(0), v)
 		})
 	}
 }

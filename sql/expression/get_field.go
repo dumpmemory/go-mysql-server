@@ -25,38 +25,62 @@ import (
 
 // GetField is an expression to get the field of a table.
 type GetField struct {
+	db         string
 	table      string
 	fieldIndex int
+	// exprId lets the lifecycle of getFields be idempotent. We can re-index
+	// or re-apply scope/caching optimizations without worrying about losing
+	// the reference to the unique id.
+	exprId     sql.ColumnId
+	tableId    sql.TableId
 	name       string
 	fieldType  sql.Type
 	fieldType2 sql.Type2
 	nullable   bool
+
+	backTickNames bool
 }
 
 var _ sql.Expression = (*GetField)(nil)
 var _ sql.Expression2 = (*GetField)(nil)
 var _ sql.CollationCoercible = (*GetField)(nil)
+var _ sql.IdExpression = (*GetField)(nil)
 
 // NewGetField creates a GetField expression.
 func NewGetField(index int, fieldType sql.Type, fieldName string, nullable bool) *GetField {
-	return NewGetFieldWithTable(index, fieldType, "", fieldName, nullable)
+	return NewGetFieldWithTable(index, 0, fieldType, "", "", fieldName, nullable)
 }
 
 // NewGetFieldWithTable creates a GetField expression with table name. The table name may be an alias.
-func NewGetFieldWithTable(index int, fieldType sql.Type, table, fieldName string, nullable bool) *GetField {
+func NewGetFieldWithTable(index, tableId int, fieldType sql.Type, db, table, fieldName string, nullable bool) *GetField {
 	fieldType2, _ := fieldType.(sql.Type2)
 	return &GetField{
+		db:         db,
 		table:      table,
 		fieldIndex: index,
 		fieldType:  fieldType,
 		fieldType2: fieldType2,
 		name:       fieldName,
 		nullable:   nullable,
+		exprId:     sql.ColumnId(index),
+		tableId:    sql.TableId(tableId),
 	}
 }
 
 // Index returns the index where the GetField will look for the value from a sql.Row.
 func (p *GetField) Index() int { return p.fieldIndex }
+
+func (p *GetField) Id() sql.ColumnId { return p.exprId }
+
+func (p *GetField) WithId(id sql.ColumnId) sql.IdExpression {
+	ret := *p
+	ret.exprId = id
+	return &ret
+}
+
+func (p *GetField) TableId() sql.TableId { return p.tableId }
+
+func (p *GetField) Database() string { return p.db }
 
 // Children implements the Expression interface.
 func (*GetField) Children() []sql.Expression {
@@ -65,6 +89,10 @@ func (*GetField) Children() []sql.Expression {
 
 // Table returns the name of the field table.
 func (p *GetField) Table() string { return p.table }
+
+func (p *GetField) TableID() sql.TableId {
+	return p.tableId
+}
 
 // WithTable returns a copy of this expression with the table given
 func (p *GetField) WithTable(table string) *GetField {
@@ -86,7 +114,9 @@ func (p *GetField) Resolved() bool {
 }
 
 // Name implements the Nameable interface.
-func (p *GetField) Name() string { return p.name }
+func (p *GetField) Name() string {
+	return p.name
+}
 
 // IsNullable returns whether the field is nullable or not.
 func (p *GetField) IsNullable() bool {
@@ -132,9 +162,12 @@ func (p *GetField) WithChildren(children ...sql.Expression) (sql.Expression, err
 
 func (p *GetField) String() string {
 	if p.table == "" {
+		if p.backTickNames {
+			return "`" + p.name + "`"
+		}
 		return p.name
 	}
-	return fmt.Sprintf("%s.%s", p.table, p.name)
+	return p.table + "." + p.name
 }
 
 func (p *GetField) DebugString() string {
@@ -155,18 +188,41 @@ func (p *GetField) WithIndex(n int) sql.Expression {
 	return &p2
 }
 
+// WithBackTickNames returns a copy of this expression with the backtick names flag set to the given value.
+func (p *GetField) WithBackTickNames(backtick bool) *GetField {
+	p2 := *p
+	p2.backTickNames = backtick
+	return &p2
+}
+
+// IsBackTickNames returns whether the field name should be quoted with backticks.
+func (p *GetField) IsBackTickNames() bool {
+	return p.backTickNames
+}
+
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (p *GetField) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	collation, _ = p.fieldType.CollationCoercibility(ctx)
 	return collation, 2
 }
 
-// SchemaToGetFields takes a schema and returns an expression array of GetFields.
-func SchemaToGetFields(s sql.Schema) []sql.Expression {
+// SchemaToGetFields takes a schema and returns an expression array of
+// GetFields. If |columns| is provided, each get field will get the
+// appropriate expression id.
+func SchemaToGetFields(s sql.Schema, columns sql.ColSet) []sql.Expression {
 	ret := make([]sql.Expression, len(s))
 
+	var offset sql.ColumnId
+	if !columns.Empty() {
+		offset, _ = columns.Next(1)
+	}
 	for i, col := range s {
-		ret[i] = NewGetFieldWithTable(i, col.Type, col.Source, col.Name, col.Nullable)
+		// 0 id represents the dual table column
+		id := i
+		if offset > 0 {
+			id += int(offset)
+		}
+		ret[i] = NewGetFieldWithTable(id, 0, col.Type, col.DatabaseSource, col.Source, col.Name, col.Nullable)
 	}
 
 	return ret

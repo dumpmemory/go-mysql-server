@@ -17,6 +17,7 @@ package plan
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dolthub/vitess/go/sqltypes"
@@ -25,24 +26,11 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
-func getForeignKeyTable(t sql.Table) (sql.ForeignKeyTable, error) {
-	switch t := t.(type) {
-	case sql.ForeignKeyTable:
-		return t, nil
-	case sql.TableWrapper:
-		return getForeignKeyTable(t.Underlying())
-	case *ResolvedTable:
-		return getForeignKeyTable(t.Table)
-	default:
-		return nil, sql.ErrNoForeignKeySupport.New(t.Name())
-	}
-}
-
 type CreateForeignKey struct {
 	// In the cases where we have multiple ALTER statements, we need to resolve the table at execution time rather than
 	// during analysis. Otherwise, you could add a column in the preceding alter and we may have analyzed to a table
 	// that did not yet have that column.
-	dbProvider sql.DatabaseProvider
+	DbProvider sql.DatabaseProvider
 	FkDef      *sql.ForeignKeyConstraint
 }
 
@@ -53,7 +41,7 @@ var _ sql.CollationCoercible = (*CreateForeignKey)(nil)
 
 func NewAlterAddForeignKey(fkDef *sql.ForeignKeyConstraint) *CreateForeignKey {
 	return &CreateForeignKey{
-		dbProvider: nil,
+		DbProvider: nil,
 		FkDef:      fkDef,
 	}
 }
@@ -64,7 +52,11 @@ func (p *CreateForeignKey) Database() string {
 
 // Resolved implements the interface sql.Node.
 func (p *CreateForeignKey) Resolved() bool {
-	return p.dbProvider != nil
+	return p.DbProvider != nil
+}
+
+func (p *CreateForeignKey) IsReadOnly() bool {
+	return false
 }
 
 // Children implements the interface sql.Node.
@@ -75,12 +67,6 @@ func (p *CreateForeignKey) Children() []sql.Node {
 // WithChildren implements the interface sql.Node.
 func (p *CreateForeignKey) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NillaryWithChildren(p, children...)
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (p *CreateForeignKey) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(p.FkDef.ParentDatabase, p.FkDef.ParentTable, "", sql.PrivilegeType_References))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -95,65 +81,14 @@ func (p *CreateForeignKey) Schema() sql.Schema {
 
 // DatabaseProvider implements the interface sql.MultiDatabaser.
 func (p *CreateForeignKey) DatabaseProvider() sql.DatabaseProvider {
-	return p.dbProvider
+	return p.DbProvider
 }
 
 // WithDatabaseProvider implements the interface sql.MultiDatabaser.
 func (p *CreateForeignKey) WithDatabaseProvider(provider sql.DatabaseProvider) (sql.Node, error) {
 	np := *p
-	np.dbProvider = provider
+	np.DbProvider = provider
 	return &np, nil
-}
-
-// RowIter implements the interface sql.Node.
-func (p *CreateForeignKey) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	if p.FkDef.OnUpdate == sql.ForeignKeyReferentialAction_SetDefault || p.FkDef.OnDelete == sql.ForeignKeyReferentialAction_SetDefault {
-		return nil, sql.ErrForeignKeySetDefault.New()
-	}
-	db, err := p.dbProvider.Database(ctx, p.FkDef.Database)
-	if err != nil {
-		return nil, err
-	}
-	tbl, ok, err := db.GetTableInsensitive(ctx, p.FkDef.Table)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, sql.ErrTableNotFound.New(p.FkDef.Table)
-	}
-
-	refDb, err := p.dbProvider.Database(ctx, p.FkDef.ParentDatabase)
-	if err != nil {
-		return nil, err
-	}
-	refTbl, ok, err := refDb.GetTableInsensitive(ctx, p.FkDef.ParentTable)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, sql.ErrTableNotFound.New(p.FkDef.ParentTable)
-	}
-
-	fkTbl, ok := tbl.(sql.ForeignKeyTable)
-	if !ok {
-		return nil, sql.ErrNoForeignKeySupport.New(p.FkDef.Table)
-	}
-	refFkTbl, ok := refTbl.(sql.ForeignKeyTable)
-	if !ok {
-		return nil, sql.ErrNoForeignKeySupport.New(p.FkDef.ParentTable)
-	}
-
-	fkChecks, err := ctx.GetSessionVariable(ctx, "foreign_key_checks")
-	if err != nil {
-		return nil, err
-	}
-
-	err = ResolveForeignKey(ctx, fkTbl, refFkTbl, *p.FkDef, true, fkChecks.(int8) == 1)
-	if err != nil {
-		return nil, err
-	}
-
-	return sql.RowsToRowIter(sql.NewRow(types.NewOkResult(0))), nil
 }
 
 // String implements the interface sql.Node.
@@ -172,7 +107,9 @@ func (p *CreateForeignKey) String() string {
 
 // ResolveForeignKey verifies the foreign key definition and resolves the foreign key, creating indexes and validating
 // data as necessary.
-func ResolveForeignKey(ctx *sql.Context, tbl sql.ForeignKeyTable, refTbl sql.ForeignKeyTable, fkDef sql.ForeignKeyConstraint, shouldAdd, fkChecks bool) error {
+// fkChecks - whether to check the foreign key against the data in the table
+// checkRows - whether to check the existing rows in the table against the foreign key
+func ResolveForeignKey(ctx *sql.Context, tbl sql.ForeignKeyTable, refTbl sql.ForeignKeyTable, fkDef sql.ForeignKeyConstraint, shouldAdd, fkChecks, checkRows bool) error {
 	if t, ok := tbl.(sql.TemporaryTable); ok && t.IsTemporary() {
 		return sql.ErrTemporaryTablesForeignKeySupport.New()
 	}
@@ -247,7 +184,7 @@ func ResolveForeignKey(ctx *sql.Context, tbl sql.ForeignKeyTable, refTbl sql.For
 		}
 
 		// Ensure that a suitable index exists on the referenced table, and check the declaring table for a suitable index.
-		refTblIndex, ok, err := FindIndexWithPrefix(ctx, refTbl, fkDef.ParentColumns)
+		refTblIndex, ok, err := FindFKIndexWithPrefix(ctx, refTbl, fkDef.ParentColumns, true)
 		if err != nil {
 			return err
 		}
@@ -278,10 +215,15 @@ func ResolveForeignKey(ctx *sql.Context, tbl sql.ForeignKeyTable, refTbl sql.For
 			},
 		}
 
-		if err := reference.CheckTable(ctx, tbl); err != nil {
-			return err
+		if checkRows {
+			if err := reference.CheckTable(ctx, tbl); err != nil {
+				return err
+			}
 		}
 	}
+
+	// If no name was explicitly provided, we'll generate one
+	generateConstraintName := len(fkDef.Name) == 0
 
 	// Check if the current foreign key name has already been used. Rather than checking the table first (which is the
 	// highest cost part of creating a foreign key), we'll check the name if it needs to be checked. If the foreign key
@@ -291,15 +233,36 @@ func ResolveForeignKey(ctx *sql.Context, tbl sql.ForeignKeyTable, refTbl sql.For
 		if err != nil {
 			return err
 		}
-		fkLowerName := strings.ToLower(fkDef.Name)
-		for _, existingFk := range existingFks {
-			if fkLowerName == strings.ToLower(existingFk.Name) {
-				return sql.ErrForeignKeyDuplicateName.New(fkDef.Name)
+
+		if generateConstraintName {
+			// find the next available name
+			// negative numbers behave weirdly
+			fkNamePrefix := fmt.Sprintf("%s_ibfk_", strings.ToLower(tbl.Name()))
+			var highest uint32
+			for _, existingFk := range existingFks {
+				if strings.HasPrefix(existingFk.Name, fkNamePrefix) {
+					numStr := strings.TrimPrefix(existingFk.Name, fkNamePrefix)
+					num, err := strconv.Atoi(numStr)
+					if err != nil {
+						continue
+					}
+					if uint32(num) > highest {
+						highest = uint32(num)
+					}
+				}
+			}
+			fkDef.Name = fmt.Sprintf("%s%d", fkNamePrefix, uint32(highest)+1)
+		} else {
+			fkLowerName := strings.ToLower(fkDef.Name)
+			for _, existingFk := range existingFks {
+				if fkLowerName == strings.ToLower(existingFk.Name) {
+					return sql.ErrForeignKeyDuplicateName.New(fkDef.Name)
+				}
 			}
 		}
 	}
 
-	_, ok, err := FindIndexWithPrefix(ctx, tbl, fkDef.Columns)
+	_, ok, err := FindFKIndexWithPrefix(ctx, tbl, fkDef.Columns, false)
 	if err != nil {
 		return err
 	}
@@ -319,14 +282,26 @@ func ResolveForeignKey(ctx *sql.Context, tbl sql.ForeignKeyTable, refTbl sql.For
 		for _, index := range indexes {
 			indexMap[strings.ToLower(index.ID())] = struct{}{}
 		}
-		indexName := strings.Join(fkDef.Columns, "")
-		if _, ok = indexMap[strings.ToLower(indexName)]; ok {
-			for i := 0; true; i++ {
-				newIndexName := fmt.Sprintf("%s_%d", indexName, i)
-				if _, ok = indexMap[strings.ToLower(newIndexName)]; !ok {
-					indexName = newIndexName
-					break
+
+		var indexName string
+		if generateConstraintName {
+			// MySQL names the index after the first column in the foreign key
+			indexName = fkDef.Columns[0]
+			if _, ok = indexMap[strings.ToLower(indexName)]; ok {
+				for i := 2; true; i++ {
+					newIndexName := fmt.Sprintf("%s_%d", indexName, i)
+					if _, ok = indexMap[strings.ToLower(newIndexName)]; !ok {
+						indexName = newIndexName
+						break
+					}
 				}
+			}
+		} else {
+			// If the FK constraint name was explicitly provided, use that as the index name to match MySQL's behavior
+			indexName = fkDef.Name
+			// If there is a collision with an existing key name, MySQL throws a duplicate key error
+			if _, exists := indexMap[strings.ToLower(indexName)]; exists {
+				return sql.ErrDuplicateKey.New(indexName)
 			}
 		}
 		err = tbl.CreateIndexForForeignKey(ctx, sql.IndexDef{
@@ -353,7 +328,7 @@ type DropForeignKey struct {
 	// In the cases where we have multiple ALTER statements, we need to resolve the table at execution time rather than
 	// during analysis. Otherwise, you could add a foreign key in the preceding alter and we may have analyzed to a
 	// table that did not yet have that foreign key.
-	dbProvider sql.DatabaseProvider
+	DbProvider sql.DatabaseProvider
 	database   string
 	Table      string
 	Name       string
@@ -366,7 +341,7 @@ var _ sql.CollationCoercible = (*DropForeignKey)(nil)
 
 func NewAlterDropForeignKey(db, table, name string) *DropForeignKey {
 	return &DropForeignKey{
-		dbProvider: nil,
+		DbProvider: nil,
 		database:   db,
 		Table:      table,
 		Name:       name,
@@ -377,40 +352,9 @@ func (p *DropForeignKey) Database() string {
 	return p.database
 }
 
-// RowIter implements the interface sql.Node.
-func (p *DropForeignKey) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	db, err := p.dbProvider.Database(ctx, p.database)
-	if err != nil {
-		return nil, err
-	}
-	tbl, ok, err := db.GetTableInsensitive(ctx, p.Table)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, sql.ErrTableNotFound.New(p.Table)
-	}
-	fkTbl, ok := tbl.(sql.ForeignKeyTable)
-	if !ok {
-		return nil, sql.ErrNoForeignKeySupport.New(p.Name)
-	}
-	err = fkTbl.DropForeignKey(ctx, p.Name)
-	if err != nil {
-		return nil, err
-	}
-
-	return sql.RowsToRowIter(sql.NewRow(types.NewOkResult(0))), nil
-}
-
 // WithChildren implements the interface sql.Node.
 func (p *DropForeignKey) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NillaryWithChildren(p, children...)
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (p *DropForeignKey) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(p.database, p.Table, "", sql.PrivilegeType_Alter))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -425,19 +369,23 @@ func (p *DropForeignKey) Schema() sql.Schema {
 
 // DatabaseProvider implements the interface sql.MultiDatabaser.
 func (p *DropForeignKey) DatabaseProvider() sql.DatabaseProvider {
-	return p.dbProvider
+	return p.DbProvider
 }
 
 // WithDatabaseProvider implements the interface sql.MultiDatabaser.
 func (p *DropForeignKey) WithDatabaseProvider(provider sql.DatabaseProvider) (sql.Node, error) {
 	np := *p
-	np.dbProvider = provider
+	np.DbProvider = provider
 	return &np, nil
 }
 
 // Resolved implements the interface sql.Node.
 func (p *DropForeignKey) Resolved() bool {
-	return p.dbProvider != nil
+	return p.DbProvider != nil
+}
+
+func (p *DropForeignKey) IsReadOnly() bool {
+	return false
 }
 
 // Children implements the interface sql.Node.
@@ -449,6 +397,78 @@ func (p *DropForeignKey) Children() []sql.Node {
 func (p *DropForeignKey) String() string {
 	pr := sql.NewTreePrinter()
 	_ = pr.WriteNode("DropForeignKey(%s)", p.Name)
+	_ = pr.WriteChildren(fmt.Sprintf("Table(%s.%s)", p.Database(), p.Table))
+	return pr.String()
+}
+
+type RenameForeignKey struct {
+	DbProvider sql.DatabaseProvider
+	database   string
+	Table      string
+	OldName    string
+	NewName    string
+}
+
+func NewAlterRenameForeignKey(db, table, oldName, newName string) *RenameForeignKey {
+	return &RenameForeignKey{
+		DbProvider: nil,
+		database:   db,
+		Table:      table,
+		OldName:    oldName,
+		NewName:    newName,
+	}
+}
+
+// Database implements the sql.Node interface.
+func (p *RenameForeignKey) Database() string {
+	return p.database
+}
+
+// WithChildren implements the interface sql.Node.
+func (p *RenameForeignKey) WithChildren(children ...sql.Node) (sql.Node, error) {
+	return NillaryWithChildren(p, children...)
+}
+
+// CollationCoercibility implements the interface sql.CollationCoercible.
+func (p *RenameForeignKey) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+	return sql.Collation_binary, 7
+}
+
+// Schema implements the interface sql.Node.
+func (p *RenameForeignKey) Schema() sql.Schema {
+	return types.OkResultSchema
+}
+
+// DatabaseProvider implements the interface sql.MultiDatabaser.
+func (p *RenameForeignKey) DatabaseProvider() sql.DatabaseProvider {
+	return p.DbProvider
+}
+
+// WithDatabaseProvider implements the interface sql.MultiDatabaser.
+func (p *RenameForeignKey) WithDatabaseProvider(provider sql.DatabaseProvider) (sql.Node, error) {
+	np := *p
+	np.DbProvider = provider
+	return &np, nil
+}
+
+// Resolved implements the interface sql.Node.
+func (p *RenameForeignKey) Resolved() bool {
+	return p.DbProvider != nil
+}
+
+func (p *RenameForeignKey) IsReadOnly() bool {
+	return false
+}
+
+// Children implements the interface sql.Node.
+func (p *RenameForeignKey) Children() []sql.Node {
+	return nil
+}
+
+// String implements the interface sql.Node.
+func (p *RenameForeignKey) String() string {
+	pr := sql.NewTreePrinter()
+	_ = pr.WriteNode("RenameForeignKey(%s, %s)", p.OldName, p.NewName)
 	_ = pr.WriteChildren(fmt.Sprintf("Table(%s.%s)", p.Database(), p.Table))
 	return pr.String()
 }
@@ -479,7 +499,13 @@ func FindForeignKeyColMapping(
 	var appendTypes []sql.Type
 	indexTypeMap := make(map[string]sql.Type)
 	indexColMap := make(map[string]int)
-	for i, indexCol := range index.ColumnExpressionTypes() {
+	var columnExpressionTypes []sql.ColumnExpressionType
+	if extendedIndex, ok := index.(sql.ExtendedIndex); ok {
+		columnExpressionTypes = extendedIndex.ExtendedColumnExpressionTypes()
+	} else {
+		columnExpressionTypes = index.ColumnExpressionTypes()
+	}
+	for i, indexCol := range columnExpressionTypes {
 		indexColName := strings.ToLower(indexCol.Expression)
 		indexTypeMap[indexColName] = indexCol.Type
 		indexColMap[indexColName] = i
@@ -513,8 +539,8 @@ func FindForeignKeyColMapping(
 	return indexPositions, appendTypes, nil
 }
 
-// FindIndexWithPrefix returns an index that has the given columns as a prefix. The returned index is deterministic and
-// follows the given rules, from the highest priority in descending order:
+// FindFKIndexWithPrefix returns an index that has the given columns as a prefix, with the index intended for use with
+// foreign keys. The returned index is deterministic and follows the given rules, from the highest priority in descending order:
 //
 // 1. Columns exactly match the index
 // 2. Columns match as much of the index prefix as possible
@@ -526,7 +552,11 @@ func FindForeignKeyColMapping(
 // prefix. For example, the slices [col1, col2] and [col2, col1] will match the same index, as their ordering does not
 // matter. The index [col1, col2, col3] would match, but the index [col1, col3] would not match as it is missing "col2".
 // Prefix columns are case-insensitive.
-func FindIndexWithPrefix(ctx *sql.Context, tbl sql.IndexAddressableTable, prefixCols []string, ignoredIndexes ...string) (sql.Index, bool, error) {
+//
+// If `useExtendedIndexes` is true, then this will include any implicit primary keys that were not explicitly defined on
+// the index. Some operations only consider explicitly indexed columns, while others also consider any implicit primary
+// keys as well, therefore this is a boolean to control the desired behavior.
+func FindFKIndexWithPrefix(ctx *sql.Context, tbl sql.IndexAddressableTable, prefixCols []string, useExtendedIndexes bool, ignoredIndexes ...string) (sql.Index, bool, error) {
 	type idxWithLen struct {
 		sql.Index
 		colLen int
@@ -541,12 +571,12 @@ func FindIndexWithPrefix(ctx *sql.Context, tbl sql.IndexAddressableTable, prefix
 	if err != nil {
 		return nil, false, err
 	}
-	// ignore indexes with prefix lengths; they are unsupported in MySQL
+	// Ignore indexes with prefix lengths; they are unsupported in MySQL
 	// https://dev.mysql.com/doc/refman/8.0/en/create-table-foreign-keys.html#:~:text=Index%20prefixes%20on%20foreign%20key%20columns%20are%20not%20supported.
-	// ignore spatial indexes; MySQL will not pick them as the underlying secondary index for foreign keys
+	// Ignore spatial indexes; MySQL will not pick them as the underlying secondary index for foreign keys
 	for _, idx := range indexes {
-		if len(idx.PrefixLengths()) > 0 || idx.IsSpatial() {
-			ignoredIndexesMap[idx.ID()] = struct{}{}
+		if len(idx.PrefixLengths()) > 0 || idx.IsSpatial() || idx.IsFullText() {
+			ignoredIndexesMap[strings.ToLower(idx.ID())] = struct{}{}
 		}
 	}
 	tblName := strings.ToLower(tbl.Name())
@@ -560,8 +590,13 @@ func FindIndexWithPrefix(ctx *sql.Context, tbl sql.IndexAddressableTable, prefix
 		if _, ok := ignoredIndexesMap[strings.ToLower(idx.ID())]; ok {
 			continue
 		}
-		indexExprs := lowercaseSlice(idx.Expressions())
-		if ok, prefixCount := exprsAreIndexSubset(exprCols, indexExprs); ok && prefixCount == colLen {
+		var indexExprs []string
+		if extendedIdx, ok := idx.(sql.ExtendedIndex); ok && useExtendedIndexes {
+			indexExprs = lowercaseSlice(extendedIdx.ExtendedExpressions())
+		} else {
+			indexExprs = lowercaseSlice(idx.Expressions())
+		}
+		if ok := exprsAreIndexPrefix(exprCols, indexExprs); ok {
 			indexesWithLen = append(indexesWithLen, idxWithLen{idx, len(indexExprs)})
 		}
 	}
@@ -615,39 +650,19 @@ func foreignKeyComparableTypes(ctx *sql.Context, type1 sql.Type, type2 sql.Type)
 	return true
 }
 
-// TODO: copy of analyzer.exprsAreIndexSubset, need to shift stuff around to eliminate import cycle
-func exprsAreIndexSubset(exprs, indexExprs []string) (ok bool, prefixCount int) {
+// exprsAreIndexPrefix returns whether the given expressions are a prefix of the given index expressions
+func exprsAreIndexPrefix(exprs, indexExprs []string) bool {
 	if len(exprs) > len(indexExprs) {
-		return false, 0
+		return false
 	}
 
-	visitedIndexExprs := make([]bool, len(indexExprs))
-	for _, expr := range exprs {
-		found := false
-		for j, indexExpr := range indexExprs {
-			if visitedIndexExprs[j] {
-				continue
-			}
-			if expr == indexExpr {
-				visitedIndexExprs[j] = true
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false, 0
+	for i := 0; i < len(exprs); i++ {
+		if exprs[i] != indexExprs[i] {
+			return false
 		}
 	}
 
-	// This checks the length of the prefix by checking how many true booleans are encountered before the first false
-	for i, visitedExpr := range visitedIndexExprs {
-		if visitedExpr {
-			continue
-		}
-		return true, i
-	}
-
-	return true, len(exprs)
+	return true
 }
 
 func lowercaseSlice(strs []string) []string {

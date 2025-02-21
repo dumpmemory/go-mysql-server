@@ -22,18 +22,13 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/dolthub/go-mysql-server/internal/regex"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
-func newDefaultLikeMatcher(likeStr string) (regex.DisposableMatcher, error) {
-	return regex.NewDisposableMatcher("go", likeStr)
-}
-
 // Like performs pattern matching against two strings.
 type Like struct {
-	BinaryExpression
+	BinaryExpressionStub
 	Escape sql.Expression
 	pool   *sync.Pool
 	once   sync.Once
@@ -59,11 +54,11 @@ func NewLike(left, right, escape sql.Expression) sql.Expression {
 	})
 
 	return &Like{
-		BinaryExpression: BinaryExpression{left, right},
-		Escape:           escape,
-		pool:             nil,
-		once:             sync.Once{},
-		cached:           cached,
+		BinaryExpressionStub: BinaryExpressionStub{left, right},
+		Escape:               escape,
+		pool:                 nil,
+		once:                 sync.Once{},
+		cached:               cached,
 	}
 }
 
@@ -72,8 +67,8 @@ func (l *Like) Type() sql.Type { return types.Boolean }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (l *Like) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
-	leftCollation, leftCoercibility := sql.GetCoercibility(ctx, l.Left)
-	rightCollation, rightCoercibility := sql.GetCoercibility(ctx, l.Right)
+	leftCollation, leftCoercibility := sql.GetCoercibility(ctx, l.LeftChild)
+	rightCollation, rightCoercibility := sql.GetCoercibility(ctx, l.RightChild)
 	return sql.ResolveCoercibility(leftCollation, leftCoercibility, rightCollation, rightCoercibility)
 }
 
@@ -82,37 +77,33 @@ func (l *Like) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	span, ctx := ctx.Span("expression.Like")
 	defer span.End()
 
-	left, err := l.Left.Eval(ctx, row)
+	left, err := l.LeftChild.Eval(ctx, row)
 	if err != nil || left == nil {
 		return nil, err
 	}
 	if _, ok := left.(string); !ok {
-		left, err = types.LongText.Convert(left)
+		left, _, err = types.LongText.Convert(left)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	var lm LikeMatcher
+	right, escape, err := l.evalRight(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+	if right == nil {
+		return nil, nil
+	}
 	if !l.cached {
 		// for non-cached regex every time create a new matcher
-		right, escape, rerr := l.evalRight(ctx, row)
-		if rerr != nil {
-			return nil, rerr
-		}
-		if right == nil {
-			return nil, nil
-		}
 		collation, _ := l.CollationCoercibility(ctx)
 		lm, err = ConstructLikeMatcher(collation, *right, escape)
 	} else {
 		l.once.Do(func() {
-			right, escape, err := l.evalRight(ctx, row)
 			l.pool = &sync.Pool{
 				New: func() interface{} {
-					if err != nil || right == nil {
-						return likeMatcherErrTuple{LikeMatcher{}, err}
-					}
 					collation, _ := l.CollationCoercibility(ctx)
 					m, e := ConstructLikeMatcher(collation, *right, escape)
 					return likeMatcherErrTuple{m, e}
@@ -137,12 +128,12 @@ func (l *Like) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 }
 
 func (l *Like) evalRight(ctx *sql.Context, row sql.Row) (right *string, escape rune, err error) {
-	rightVal, err := l.Right.Eval(ctx, row)
+	rightVal, err := l.RightChild.Eval(ctx, row)
 	if err != nil || rightVal == nil {
 		return nil, 0, err
 	}
 	if _, ok := rightVal.(string); !ok {
-		rightVal, err = types.LongText.Convert(rightVal)
+		rightVal, _, err = types.LongText.Convert(rightVal)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -158,7 +149,7 @@ func (l *Like) evalRight(ctx *sql.Context, row sql.Row) (right *string, escape r
 			escapeVal = `\`
 		}
 		if _, ok := escapeVal.(string); !ok {
-			escapeVal, err = types.LongText.Convert(escapeVal)
+			escapeVal, _, err = types.LongText.Convert(escapeVal)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -175,7 +166,7 @@ func (l *Like) evalRight(ctx *sql.Context, row sql.Row) (right *string, escape r
 }
 
 func (l *Like) String() string {
-	return fmt.Sprintf("%s LIKE %s", l.Left, l.Right)
+	return fmt.Sprintf("%s LIKE %s", l.LeftChild, l.RightChild)
 }
 
 // WithChildren implements the Expression interface.

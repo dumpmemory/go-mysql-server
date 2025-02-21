@@ -229,7 +229,7 @@ func RoundFloatSlices(v interface{}, p float64) interface{} {
 	return nil
 }
 
-// getIntArg is a helper method that evaluates the given sql.Expression to an int type, errors on float32 and float 64,
+// getIntArg is a helper method that evaluates the given sql.Expression to an int type, errors on float32 and float64,
 // and returns nil
 func getIntArg(ctx *sql.Context, row sql.Row, expr sql.Expression) (interface{}, error) {
 	x, err := expr.Eval(ctx, row)
@@ -243,7 +243,7 @@ func getIntArg(ctx *sql.Context, row sql.Row, expr sql.Expression) (interface{},
 	case float32, float64:
 		return nil, errors.New("received a float when it should be an int")
 	}
-	x, err = types.Int64.Convert(x)
+	x, _, err = types.Int64.Convert(x)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +667,7 @@ func (g *GeomFromGeoJSON) Eval(ctx *sql.Context, row sql.Row) (interface{}, erro
 	if val == nil {
 		return nil, nil
 	}
-	val, err = types.LongBlob.Convert(val)
+	val, _, err = types.LongBlob.Convert(val)
 	if err != nil {
 		return nil, err
 	}
@@ -748,10 +748,10 @@ func (g *GeomFromGeoJSON) Eval(ctx *sql.Context, row sql.Row) (interface{}, erro
 	if err != nil {
 		return nil, errors.New("incorrect srid value")
 	}
-	srid := uint32(s.(int))
-	if err = ValidateSRID(srid); err != nil {
+	if err = types.ValidateSRID(s.(int), g.FunctionName()); err != nil {
 		return nil, err
 	}
+	srid := uint32(s.(int))
 	res = res.(types.GeometryValue).SetSRID(srid)
 	return res, nil
 }

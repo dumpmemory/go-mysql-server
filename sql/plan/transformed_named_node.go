@@ -41,8 +41,8 @@ func (n *TransformedNamedNode) Schema() sql.Schema {
 	return n.Child.Schema()
 }
 
-func (n *TransformedNamedNode) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	return n.Child.RowIter(ctx, row)
+func (n *TransformedNamedNode) IsReadOnly() bool {
+	return n.Child.IsReadOnly()
 }
 
 func (n *TransformedNamedNode) WithChildren(children ...sql.Node) (sql.Node, error) {
@@ -50,11 +50,6 @@ func (n *TransformedNamedNode) WithChildren(children ...sql.Node) (sql.Node, err
 		return nil, sql.ErrInvalidChildrenNumber.New(n, len(children), 1)
 	}
 	return NewTransformedNamedNode(children[0], n.name), nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (n *TransformedNamedNode) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return n.Child.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

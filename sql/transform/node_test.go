@@ -317,6 +317,10 @@ func (n *testNode) Schema() sql.Schema {
 	return nil
 }
 
+func (n *testNode) IsReadOnly() bool {
+	return true
+}
+
 func (n *testNode) Children() []sql.Node {
 	return n.children
 }
@@ -329,10 +333,6 @@ func (n *testNode) WithChildren(nodes ...sql.Node) (sql.Node, error) {
 	nn := *n
 	nn.children = nodes
 	return &nn, nil
-}
-
-func (n *testNode) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return true
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

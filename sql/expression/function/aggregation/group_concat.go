@@ -34,6 +34,7 @@ type GroupConcat struct {
 	maxLen      int
 	returnType  sql.Type
 	window      *sql.WindowDefinition
+	id          sql.ColumnId
 }
 
 var _ sql.FunctionExpression = &GroupConcat{}
@@ -54,15 +55,27 @@ func (g *GroupConcat) Description() string {
 	return "returns a string result with the concatenated non-NULL values from a group."
 }
 
-func NewGroupConcat(distinct string, orderBy sql.SortFields, separator string, selectExprs []sql.Expression, maxLen int) (*GroupConcat, error) {
-	return &GroupConcat{distinct: distinct, sf: orderBy, separator: separator, selectExprs: selectExprs, maxLen: maxLen}, nil
+func NewGroupConcat(distinct string, orderBy sql.SortFields, separator string, selectExprs []sql.Expression, maxLen int) *GroupConcat {
+	return &GroupConcat{distinct: distinct, sf: orderBy, separator: separator, selectExprs: selectExprs, maxLen: maxLen}
+}
+
+// Id implements the Aggregation interface
+func (a *GroupConcat) Id() sql.ColumnId {
+	return a.id
+}
+
+// WithId implements the Aggregation interface
+func (a *GroupConcat) WithId(id sql.ColumnId) sql.IdExpression {
+	ret := *a
+	ret.id = id
+	return &ret
 }
 
 // WithWindow implements sql.Aggregation
-func (g *GroupConcat) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
+func (g *GroupConcat) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
 	ng := *g
 	ng.window = window
-	return &ng, nil
+	return &ng
 }
 
 // Window implements sql.Aggregation
@@ -132,10 +145,8 @@ func (g *GroupConcat) String() string {
 		}
 	}
 
-	if g.separator != "," {
-		sb.WriteString(" separator ")
-		sb.WriteString(fmt.Sprintf("'%s'", g.separator))
-	}
+	sb.WriteString(" separator ")
+	sb.WriteString(fmt.Sprintf("'%s'", g.separator))
 
 	sb.WriteString(")")
 
@@ -181,7 +192,7 @@ func (g *GroupConcat) WithChildren(children ...sql.Expression) (sql.Expression, 
 	sortFieldMarker := len(g.sf)
 	orderByExpr := children[:len(g.sf)]
 
-	return NewGroupConcat(g.distinct, g.sf.FromExpressions(orderByExpr...), g.separator, children[sortFieldMarker:], g.maxLen)
+	return NewGroupConcat(g.distinct, g.sf.FromExpressions(orderByExpr...), g.separator, children[sortFieldMarker:], g.maxLen), nil
 }
 
 type groupConcatBuffer struct {
@@ -207,7 +218,7 @@ func (g *groupConcatBuffer) Update(ctx *sql.Context, originalRow sql.Row) error 
 	var v interface{}
 	var vs string
 	if types.IsBlobType(retType) {
-		v, err = types.Blob.Convert(evalRow[0])
+		v, _, err = types.Blob.Convert(evalRow[0])
 		if err != nil {
 			return err
 		}
@@ -216,7 +227,7 @@ func (g *groupConcatBuffer) Update(ctx *sql.Context, originalRow sql.Row) error 
 			return nil
 		}
 	} else {
-		v, err = types.LongText.Convert(evalRow[0])
+		v, _, err = types.LongText.Convert(evalRow[0])
 		if err != nil {
 			return err
 		}

@@ -15,8 +15,6 @@
 package plan
 
 import (
-	"strings"
-
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
@@ -56,6 +54,10 @@ func (s *ShowTriggers) String() string {
 	return "SHOW TRIGGERS"
 }
 
+func (s *ShowTriggers) IsReadOnly() bool {
+	return true
+}
+
 // Resolved implements the sql.Node interface.
 func (s *ShowTriggers) Resolved() bool {
 	_, ok := s.db.(sql.UnresolvedDatabase)
@@ -72,51 +74,9 @@ func (s *ShowTriggers) Schema() sql.Schema {
 	return showTriggersSchema
 }
 
-// RowIter implements the sql.Node interface.
-func (s *ShowTriggers) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	var rows []sql.Row
-	for _, trigger := range s.Triggers {
-		triggerEvent := strings.ToUpper(trigger.TriggerEvent)
-		triggerTime := strings.ToUpper(trigger.TriggerTime)
-		tableName := trigger.Table.(*UnresolvedTable).Name()
-		characterSetClient, err := ctx.GetSessionVariable(ctx, "character_set_client")
-		if err != nil {
-			return nil, err
-		}
-		collationConnection, err := ctx.GetSessionVariable(ctx, "collation_connection")
-		if err != nil {
-			return nil, err
-		}
-		collationServer, err := ctx.GetSessionVariable(ctx, "collation_server")
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, sql.Row{
-			trigger.TriggerName, // Trigger
-			triggerEvent,        // Event
-			tableName,           // Table
-			trigger.BodyString,  // Statement
-			triggerTime,         // Timing
-			trigger.CreatedAt,   // Created
-			"",                  // sql_mode
-			"",                  // Definer
-			characterSetClient,  // character_set_client
-			collationConnection, // collation_connection
-			collationServer,     // Database Collation
-		})
-	}
-	return sql.RowsToRowIter(rows...), nil
-}
-
 // WithChildren implements the sql.Node interface.
 func (s *ShowTriggers) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NillaryWithChildren(s, children...)
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (s *ShowTriggers) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	//TODO: figure out what privileges are needed here
-	return true
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

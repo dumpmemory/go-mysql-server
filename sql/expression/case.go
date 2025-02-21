@@ -52,6 +52,16 @@ func combinedCaseBranchType(left, right sql.Type) sql.Type {
 	if right == types.Null {
 		return left
 	}
+
+	// Our current implementation of StringType.Convert(enum), does not match MySQL's behavior.
+	// So, we make sure to return Enums in this particular case.
+	// More details: https://github.com/dolthub/dolt/issues/8598
+	if types.IsEnum(left) && types.IsEnum(right) {
+		return right
+	}
+	if types.IsSet(left) && types.IsSet(right) {
+		return right
+	}
 	if types.IsTextOnly(left) && types.IsTextOnly(right) {
 		return types.LongText
 	}
@@ -62,7 +72,7 @@ func combinedCaseBranchType(left, right sql.Type) sql.Type {
 		if left == right {
 			return left
 		}
-		return types.Datetime
+		return types.DatetimeMaxPrecision
 	}
 	if types.IsNumber(left) && types.IsNumber(right) {
 		if left == types.Float64 || right == types.Float64 {
@@ -180,7 +190,12 @@ func (c *Case) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 			if err != nil {
 				return nil, err
 			}
-			return t.Convert(bval)
+			// When unable to convert to the type of the case, return the original value
+			// A common error here is "Out of bounds value for decimal type"
+			if ret, _, err := t.Convert(bval); err == nil {
+				return ret, nil
+			}
+			return bval, nil
 		}
 	}
 
@@ -189,7 +204,13 @@ func (c *Case) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		return t.Convert(val)
+		// When unable to convert to the type of the case, return the original value
+		// A common error here is "Out of bounds value for decimal type"
+		if ret, _, err := t.Convert(val); err == nil {
+			return ret, nil
+		}
+		return val, nil
+
 	}
 
 	return nil, nil

@@ -37,6 +37,10 @@ func NewHaving(cond sql.Expression, child sql.Node) *Having {
 // Resolved implements the sql.Node interface.
 func (h *Having) Resolved() bool { return h.Cond.Resolved() && h.Child.Resolved() }
 
+func (h *Having) IsReadOnly() bool {
+	return h.Child.IsReadOnly()
+}
+
 // Expressions implements the sql.Expressioner interface.
 func (h *Having) Expressions() []sql.Expression { return []sql.Expression{h.Cond} }
 
@@ -47,11 +51,6 @@ func (h *Having) WithChildren(children ...sql.Node) (sql.Node, error) {
 	}
 
 	return NewHaving(h.Cond, children[0]), nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (h *Having) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return h.Child.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -66,18 +65,6 @@ func (h *Having) WithExpressions(exprs ...sql.Expression) (sql.Node, error) {
 	}
 
 	return NewHaving(exprs[0], h.Child), nil
-}
-
-// RowIter implements the sql.Node interface.
-func (h *Having) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	span, ctx := ctx.Span("plan.Having")
-	iter, err := h.Child.RowIter(ctx, row)
-	if err != nil {
-		span.End()
-		return nil, err
-	}
-
-	return sql.NewSpanIter(span, NewFilterIter(h.Cond, iter)), nil
 }
 
 func (h *Having) String() string {

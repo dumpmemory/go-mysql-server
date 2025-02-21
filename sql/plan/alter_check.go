@@ -16,25 +16,23 @@ package plan
 
 import (
 	"fmt"
-	"io"
 
 	"gopkg.in/src-d/go-errors.v1"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/transform"
+	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 var (
 	// ErrNoCheckConstraintSupport is returned when the table does not support CONSTRAINT CHECK operations.
 	ErrNoCheckConstraintSupport = errors.NewKind("the table does not support check constraint operations: %s")
-
-	// ErrCheckViolated is returned when the check constraint evaluates to false
-	ErrCheckViolated = errors.NewKind("check constraint %s is violated.")
 )
 
 type CreateCheck struct {
-	UnaryNode
+	ddlNode
+	Table *ResolvedTable
 	Check *sql.CheckConstraint
 }
 
@@ -42,48 +40,27 @@ var _ sql.Node = (*CreateCheck)(nil)
 var _ sql.CollationCoercible = (*CreateCheck)(nil)
 
 type DropCheck struct {
-	UnaryNode
-	Name string
+	ddlNode
+	Table *ResolvedTable
+	Name  string
 }
 
 var _ sql.Node = (*DropCheck)(nil)
 var _ sql.CollationCoercible = (*DropCheck)(nil)
 
-func NewAlterAddCheck(table sql.Node, check *sql.CheckConstraint) *CreateCheck {
+func NewAlterAddCheck(table *ResolvedTable, check *sql.CheckConstraint) *CreateCheck {
 	return &CreateCheck{
-		UnaryNode: UnaryNode{table},
-		Check:     check,
+		ddlNode: ddlNode{table.SqlDatabase},
+		Table:   table,
+		Check:   check,
 	}
 }
 
-func NewAlterDropCheck(table sql.Node, name string) *DropCheck {
+func NewAlterDropCheck(table *ResolvedTable, name string) *DropCheck {
 	return &DropCheck{
-		UnaryNode: UnaryNode{Child: table},
-		Name:      name,
-	}
-}
-
-func getCheckAlterable(node sql.Node) (sql.CheckAlterableTable, error) {
-	switch node := node.(type) {
-	case sql.CheckAlterableTable:
-		return node, nil
-	case *ResolvedTable:
-		return getCheckAlterableTable(node.Table)
-	default:
-		return nil, ErrNoCheckConstraintSupport.New(node.String())
-	}
-}
-
-func getCheckAlterableTable(t sql.Table) (sql.CheckAlterableTable, error) {
-	switch t := t.(type) {
-	case sql.CheckAlterableTable:
-		return t, nil
-	case sql.TableWrapper:
-		return getCheckAlterableTable(t.Underlying())
-	case *ResolvedTable:
-		return getCheckAlterableTable(t.Table)
-	default:
-		return nil, ErrNoCheckConstraintSupport.New(t.Name())
+		ddlNode: ddlNode{table.SqlDatabase},
+		Table:   table,
+		Name:    name,
 	}
 }
 
@@ -94,7 +71,11 @@ func (c *CreateCheck) Expressions() []sql.Expression {
 
 // Resolved implements the Resolvable interface.
 func (c *CreateCheck) Resolved() bool {
-	return c.Child.Resolved() && c.Check.Expr.Resolved()
+	return c.Check.Expr.Resolved()
+}
+
+func (c *CreateCheck) IsReadOnly() bool {
+	return false
 }
 
 // WithExpressions implements the sql.Expressioner interface.
@@ -108,60 +89,16 @@ func (c *CreateCheck) WithExpressions(exprs ...sql.Expression) (sql.Node, error)
 	return &nc, nil
 }
 
-// Execute inserts the rows in the database.
-func (c *CreateCheck) Execute(ctx *sql.Context) error {
-	chAlterable, err := getCheckAlterable(c.UnaryNode.Child)
-	if err != nil {
-		return err
-	}
-
-	// check existing rows in table
-	var res interface{}
-	rowIter, err := c.UnaryNode.Child.RowIter(ctx, nil)
-	if err != nil {
-		return err
-	}
-
-	for {
-		row, err := rowIter.Next(ctx)
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return err
-		}
-
-		res, err = sql.EvaluateCondition(ctx, c.Check.Expr, row)
-		if err != nil {
-			return err
-		}
-
-		if sql.IsFalse(res) {
-			return ErrCheckViolated.New(c.Check.Name)
-		}
-	}
-
-	check, err := NewCheckDefinition(ctx, c.Check)
-	if err != nil {
-		return err
-	}
-
-	return chAlterable.CreateCheck(ctx, check)
-}
-
 // WithChildren implements the Node interface.
 func (c *CreateCheck) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 1 {
 		return nil, sql.ErrInvalidChildrenNumber.New(c, len(children), 1)
 	}
-	return NewAlterAddCheck(children[0], c.Check), nil
+	return NewAlterAddCheck(children[0].(*ResolvedTable), c.Check), nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (c *CreateCheck) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(GetDatabaseName(c.Child), getTableName(c.Child), "", sql.PrivilegeType_Alter))
+func (c *CreateCheck) Children() []sql.Node {
+	return []sql.Node{c.Table}
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -169,69 +106,43 @@ func (c *CreateCheck) CollationCoercibility(ctx *sql.Context) (collation sql.Col
 	return sql.Collation_binary, 7
 }
 
-func (c *CreateCheck) Schema() sql.Schema { return nil }
-
-func (c *CreateCheck) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	err := c.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return sql.RowsToRowIter(), nil
-}
+func (c *CreateCheck) Schema() sql.Schema { return types.OkResultSchema }
 
 func (c CreateCheck) String() string {
 	pr := sql.NewTreePrinter()
 	_ = pr.WriteNode("AddCheck(%s)", c.Check.Name)
 	_ = pr.WriteChildren(
-		fmt.Sprintf("Table(%s)", c.UnaryNode.Child.String()),
+		fmt.Sprintf("Table(%s)", c.Table.Name()),
 		fmt.Sprintf("Expr(%s)", c.Check.Expr.String()),
 	)
 	return pr.String()
 }
 
-// Execute inserts the rows in the database.
-func (p *DropCheck) Execute(ctx *sql.Context) error {
-	chAlterable, err := getCheckAlterable(p.UnaryNode.Child)
-	if err != nil {
-		return err
-	}
-	return chAlterable.DropCheck(ctx, p.Name)
-}
-
-// RowIter implements the Node interface.
-func (p *DropCheck) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	err := p.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return sql.RowsToRowIter(), nil
+func (d *DropCheck) Children() []sql.Node {
+	return []sql.Node{d.Table}
 }
 
 // WithChildren implements the Node interface.
-func (p *DropCheck) WithChildren(children ...sql.Node) (sql.Node, error) {
+func (d *DropCheck) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 1 {
-		return nil, sql.ErrInvalidChildrenNumber.New(p, len(children), 1)
+		return nil, sql.ErrInvalidChildrenNumber.New(d, len(children), 1)
 	}
-	return NewAlterDropCheck(children[0], p.Name), nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (p *DropCheck) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(GetDatabaseName(p.Child), getTableName(p.Child), "", sql.PrivilegeType_Alter))
+	return NewAlterDropCheck(children[0].(*ResolvedTable), d.Name), nil
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
-func (p *DropCheck) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+func (d *DropCheck) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	return sql.Collation_binary, 7
 }
 
-func (p *DropCheck) Schema() sql.Schema { return nil }
+func (d *DropCheck) Schema() sql.Schema { return nil }
 
-func (p DropCheck) String() string {
+func (d *DropCheck) IsReadOnly() bool { return false }
+
+func (d DropCheck) String() string {
 	pr := sql.NewTreePrinter()
-	_ = pr.WriteNode("DropCheck(%s)", p.Name)
-	_ = pr.WriteChildren(fmt.Sprintf("Table(%s)", p.UnaryNode.Child.String()))
+	_ = pr.WriteNode("DropCheck(%s)", d.Name)
+	_ = pr.WriteChildren(fmt.Sprintf("Table(%s)", d.Table.Name()))
 	return pr.String()
 }
 
@@ -274,10 +185,6 @@ func (d *DropConstraint) String() string {
 	return tp.String()
 }
 
-func (d *DropConstraint) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	panic("DropConstraint is a placeholder node, but RowIter was called")
-}
-
 func (d DropConstraint) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 1 {
 		return nil, sql.ErrInvalidChildrenNumber.New(d, len(children), 1)
@@ -288,11 +195,7 @@ func (d DropConstraint) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return nd, nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (d *DropConstraint) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(GetDatabaseName(d.Child), getTableName(d.Child), "", sql.PrivilegeType_Alter))
-}
+func (d *DropConstraint) IsReadOnly() bool { return false }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (d *DropConstraint) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {

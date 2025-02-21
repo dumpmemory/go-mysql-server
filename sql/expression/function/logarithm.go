@@ -129,16 +129,16 @@ func (l *LogBase) Eval(
 		return nil, nil
 	}
 
-	val, err := types.Float64.Convert(v)
+	val, _, err := types.Float64.Convert(v)
 	if err != nil {
 		return nil, sql.ErrInvalidType.New(reflect.TypeOf(v))
 	}
-	return computeLog(val.(float64), l.base)
+	return computeLog(ctx, val.(float64), l.base)
 }
 
 // Log is a function that returns the natural logarithm of a value.
 type Log struct {
-	expression.BinaryExpression
+	expression.BinaryExpressionStub
 }
 
 var _ sql.FunctionExpression = (*Log)(nil)
@@ -152,9 +152,9 @@ func NewLog(args ...sql.Expression) (sql.Expression, error) {
 	}
 
 	if argLen == 1 {
-		return &Log{expression.BinaryExpression{Left: expression.NewLiteral(math.E, types.Float64), Right: args[0]}}, nil
+		return &Log{expression.BinaryExpressionStub{LeftChild: expression.NewLiteral(math.E, types.Float64), RightChild: args[0]}}, nil
 	} else {
-		return &Log{expression.BinaryExpression{Left: args[0], Right: args[1]}}, nil
+		return &Log{expression.BinaryExpressionStub{LeftChild: args[0], RightChild: args[1]}}, nil
 	}
 }
 
@@ -169,7 +169,7 @@ func (l *Log) Description() string {
 }
 
 func (l *Log) String() string {
-	return fmt.Sprintf("%s(%s,%s)", l.FunctionName(), l.Left, l.Right)
+	return fmt.Sprintf("%s(%s,%s)", l.FunctionName(), l.LeftChild, l.RightChild)
 }
 
 // WithChildren implements the Expression interface.
@@ -179,7 +179,7 @@ func (l *Log) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 
 // Children implements the Expression interface.
 func (l *Log) Children() []sql.Expression {
-	return []sql.Expression{l.Left, l.Right}
+	return []sql.Expression{l.LeftChild, l.RightChild}
 }
 
 // Type returns the resultant type of the function.
@@ -194,7 +194,7 @@ func (*Log) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, 
 
 // IsNullable implements the Expression interface.
 func (l *Log) IsNullable() bool {
-	return l.Left.IsNullable() || l.Right.IsNullable()
+	return l.LeftChild.IsNullable() || l.RightChild.IsNullable()
 }
 
 // Eval implements the Expression interface.
@@ -202,7 +202,7 @@ func (l *Log) Eval(
 	ctx *sql.Context,
 	row sql.Row,
 ) (interface{}, error) {
-	left, err := l.Left.Eval(ctx, row)
+	left, err := l.LeftChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -211,12 +211,12 @@ func (l *Log) Eval(
 		return nil, nil
 	}
 
-	lhs, err := types.Float64.Convert(left)
+	lhs, _, err := types.Float64.Convert(left)
 	if err != nil {
 		return nil, sql.ErrInvalidType.New(reflect.TypeOf(left))
 	}
 
-	right, err := l.Right.Eval(ctx, row)
+	right, err := l.RightChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -225,21 +225,23 @@ func (l *Log) Eval(
 		return nil, nil
 	}
 
-	rhs, err := types.Float64.Convert(right)
+	rhs, _, err := types.Float64.Convert(right)
 	if err != nil {
 		return nil, sql.ErrInvalidType.New(reflect.TypeOf(right))
 	}
 
 	// rhs becomes value, lhs becomes base
-	return computeLog(rhs.(float64), lhs.(float64))
+	return computeLog(ctx, rhs.(float64), lhs.(float64))
 }
 
-func computeLog(v float64, base float64) (float64, error) {
+func computeLog(ctx *sql.Context, v float64, base float64) (interface{}, error) {
 	if v <= 0 {
-		return float64(0), ErrInvalidArgumentForLogarithm.New(v)
+		ctx.Warn(3020, ErrInvalidArgumentForLogarithm.New(v).Error())
+		return nil, nil
 	}
 	if base == float64(1) || base <= float64(0) {
-		return float64(0), ErrInvalidArgumentForLogarithm.New(base)
+		ctx.Warn(3020, ErrInvalidArgumentForLogarithm.New(base).Error())
+		return nil, nil
 	}
 	switch base {
 	case float64(2):

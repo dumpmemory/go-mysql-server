@@ -44,6 +44,10 @@ func (n *RenameUser) Schema() sql.Schema {
 	return types.OkResultSchema
 }
 
+func (n *RenameUser) IsReadOnly() bool {
+	return false
+}
+
 // String implements the interface sql.Node.
 func (n *RenameUser) String() string {
 	strs := make([]string, len(n.OldName))
@@ -70,12 +74,6 @@ func (n *RenameUser) WithChildren(children ...sql.Node) (sql.Node, error) {
 		return nil, sql.ErrInvalidChildrenNumber.New(n, len(children), 0)
 	}
 	return n, nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (n *RenameUser) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation("", "", "", sql.PrivilegeType_CreateUser))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

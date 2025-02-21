@@ -39,6 +39,10 @@ func NewNamedWindows(windowDefs map[string]*sql.WindowDefinition, child sql.Node
 	}
 }
 
+func (n *NamedWindows) IsReadOnly() bool {
+	return n.Child.IsReadOnly()
+}
+
 // String implements sql.Node
 func (n *NamedWindows) String() string {
 	var sb strings.Builder
@@ -82,11 +86,6 @@ func (n *NamedWindows) WithChildren(nodes ...sql.Node) (sql.Node, error) {
 		return nil, sql.ErrInvalidChildrenNumber.New(n, len(nodes), 1)
 	}
 	return NewNamedWindows(n.WindowDefs, nodes[0]), nil
-}
-
-// CheckPrivileges implements sql.Node
-func (n *NamedWindows) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return n.Child.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

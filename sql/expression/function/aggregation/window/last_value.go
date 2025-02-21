@@ -29,6 +29,7 @@ type LastValue struct {
 	window *sql.WindowDefinition
 	expression.UnaryExpression
 	pos int
+	id  sql.ColumnId
 }
 
 var _ sql.FunctionExpression = (*LastValue)(nil)
@@ -37,7 +38,19 @@ var _ sql.WindowAdaptableExpression = (*LastValue)(nil)
 var _ sql.CollationCoercible = (*LastValue)(nil)
 
 func NewLastValue(e sql.Expression) sql.Expression {
-	return &LastValue{nil, expression.UnaryExpression{Child: e}, 0}
+	return &LastValue{window: nil, UnaryExpression: expression.UnaryExpression{Child: e}}
+}
+
+// Id implements sql.IdExpression
+func (f *LastValue) Id() sql.ColumnId {
+	return f.id
+}
+
+// WithId implements sql.IdExpression
+func (f *LastValue) WithId(id sql.ColumnId) sql.IdExpression {
+	ret := *f
+	ret.id = id
+	return &ret
 }
 
 // Description implements sql.FunctionExpression
@@ -97,7 +110,7 @@ func (f *LastValue) IsNullable() bool {
 
 // Eval implements sql.Expression
 func (f *LastValue) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	panic("eval called on window function")
+	return nil, sql.ErrWindowUnsupported.New(f.FunctionName())
 }
 
 // Children implements sql.Expression
@@ -127,10 +140,10 @@ func (f *LastValue) WithChildren(children ...sql.Expression) (sql.Expression, er
 }
 
 // WithWindow implements sql.WindowAggregation
-func (f *LastValue) WithWindow(window *sql.WindowDefinition) (sql.WindowAggregation, error) {
+func (f *LastValue) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
 	nr := *f
 	nr.window = window
-	return &nr, nil
+	return &nr
 }
 
 func (f *LastValue) NewWindowFunction() (sql.WindowFunction, error) {

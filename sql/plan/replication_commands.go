@@ -37,15 +37,25 @@ const DynamicPrivilege_ReplicationSlaveAdmin = "replication_slave_admin"
 type BinlogReplicaControllerCommand interface {
 	sql.Node
 
-	// WithBinlogReplicaController returns a new instance of this BinlogReplicaController, with the binlog replica
+	// WithBinlogReplicaController returns a new instance of this BinlogReplicaControllerCommand, with the binlog replica
 	// controller configured.
 	WithBinlogReplicaController(controller binlogreplication.BinlogReplicaController) sql.Node
+}
+
+// BinlogPrimaryControllerCommand represents a SQL statement that requires a BinlogPrimaryController
+// (e.g. SHOW BINARY LOG STATUS, SHOW REPLICAS).
+type BinlogPrimaryControllerCommand interface {
+	sql.Node
+
+	// WithBinlogPrimaryController returns a new instance of this BinlogPrimaryControllerCommand, with the binlog
+	// primary controller configured.
+	WithBinlogPrimaryController(controller binlogreplication.BinlogPrimaryController) sql.Node
 }
 
 // ChangeReplicationSource is the plan node for the "CHANGE REPLICATION SOURCE TO" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/change-replication-source-to.html
 type ChangeReplicationSource struct {
-	replicaController binlogreplication.BinlogReplicaController
+	ReplicaController binlogreplication.BinlogReplicaController
 	Options           []binlogreplication.ReplicationOption
 }
 
@@ -62,12 +72,16 @@ func NewChangeReplicationSource(options []binlogreplication.ReplicationOption) *
 // WithBinlogReplicaController implements the BinlogReplicaControllerCommand interface.
 func (c *ChangeReplicationSource) WithBinlogReplicaController(controller binlogreplication.BinlogReplicaController) sql.Node {
 	nc := *c
-	nc.replicaController = controller
+	nc.ReplicaController = controller
 	return &nc
 }
 
 func (c *ChangeReplicationSource) Resolved() bool {
 	return true
+}
+
+func (c *ChangeReplicationSource) IsReadOnly() bool {
+	return false
 }
 
 func (c *ChangeReplicationSource) String() string {
@@ -90,15 +104,6 @@ func (c *ChangeReplicationSource) Children() []sql.Node {
 	return nil
 }
 
-func (c *ChangeReplicationSource) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, error) {
-	if c.replicaController == nil {
-		return nil, ErrNoReplicationController.New()
-	}
-
-	err := c.replicaController.SetReplicationSourceOptions(ctx, c.Options)
-	return sql.RowsToRowIter(), err
-}
-
 func (c *ChangeReplicationSource) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 0 {
 		return nil, sql.ErrInvalidChildrenNumber.New(c, len(children), 0)
@@ -106,11 +111,6 @@ func (c *ChangeReplicationSource) WithChildren(children ...sql.Node) (sql.Node, 
 
 	newNode := *c
 	return &newNode, nil
-}
-
-func (c *ChangeReplicationSource) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewDynamicPrivilegedOperation(DynamicPrivilege_ReplicationSlaveAdmin))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -121,7 +121,7 @@ func (*ChangeReplicationSource) CollationCoercibility(ctx *sql.Context) (collati
 // ChangeReplicationFilter is a plan node for the "CHANGE REPLICATION FILTER" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/change-replication-filter.html
 type ChangeReplicationFilter struct {
-	replicaController binlogreplication.BinlogReplicaController
+	ReplicaController binlogreplication.BinlogReplicaController
 	Options           []binlogreplication.ReplicationOption
 }
 
@@ -138,12 +138,16 @@ func NewChangeReplicationFilter(options []binlogreplication.ReplicationOption) *
 // WithBinlogReplicaController implements the BinlogReplicaControllerCommand interface.
 func (c *ChangeReplicationFilter) WithBinlogReplicaController(controller binlogreplication.BinlogReplicaController) sql.Node {
 	nc := *c
-	nc.replicaController = controller
+	nc.ReplicaController = controller
 	return &nc
 }
 
 func (c *ChangeReplicationFilter) Resolved() bool {
 	return true
+}
+
+func (c *ChangeReplicationFilter) IsReadOnly() bool {
+	return false
 }
 
 func (c *ChangeReplicationFilter) String() string {
@@ -169,15 +173,6 @@ func (c *ChangeReplicationFilter) Children() []sql.Node {
 	return nil
 }
 
-func (c *ChangeReplicationFilter) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	if c.replicaController == nil {
-		return nil, ErrNoReplicationController.New()
-	}
-
-	err := c.replicaController.SetReplicationFilterOptions(ctx, c.Options)
-	return sql.RowsToRowIter(), err
-}
-
 func (c *ChangeReplicationFilter) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 0 {
 		return nil, sql.ErrInvalidChildrenNumber.New(c, len(children), 0)
@@ -185,11 +180,6 @@ func (c *ChangeReplicationFilter) WithChildren(children ...sql.Node) (sql.Node, 
 
 	newNode := *c
 	return &newNode, nil
-}
-
-func (c *ChangeReplicationFilter) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewDynamicPrivilegedOperation(DynamicPrivilege_ReplicationSlaveAdmin))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -200,7 +190,7 @@ func (*ChangeReplicationFilter) CollationCoercibility(ctx *sql.Context) (collati
 // StartReplica is a plan node for the "START REPLICA" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/start-replica.html
 type StartReplica struct {
-	replicaController binlogreplication.BinlogReplicaController
+	ReplicaController binlogreplication.BinlogReplicaController
 }
 
 var _ sql.Node = (*StartReplica)(nil)
@@ -214,12 +204,16 @@ func NewStartReplica() *StartReplica {
 // WithBinlogReplicaController implements the BinlogReplicaControllerCommand interface.
 func (s *StartReplica) WithBinlogReplicaController(controller binlogreplication.BinlogReplicaController) sql.Node {
 	nc := *s
-	nc.replicaController = controller
+	nc.ReplicaController = controller
 	return &nc
 }
 
 func (s *StartReplica) Resolved() bool {
 	return true
+}
+
+func (s *StartReplica) IsReadOnly() bool {
+	return false
 }
 
 func (s *StartReplica) String() string {
@@ -234,15 +228,6 @@ func (s *StartReplica) Children() []sql.Node {
 	return nil
 }
 
-func (s *StartReplica) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, error) {
-	if s.replicaController == nil {
-		return nil, ErrNoReplicationController.New()
-	}
-
-	err := s.replicaController.StartReplica(ctx)
-	return sql.RowsToRowIter(), err
-}
-
 func (s *StartReplica) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 0 {
 		return nil, sql.ErrInvalidChildrenNumber.New(s, len(children), 0)
@@ -250,11 +235,6 @@ func (s *StartReplica) WithChildren(children ...sql.Node) (sql.Node, error) {
 
 	newNode := *s
 	return &newNode, nil
-}
-
-func (s *StartReplica) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewDynamicPrivilegedOperation(DynamicPrivilege_ReplicationSlaveAdmin))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -265,7 +245,7 @@ func (*StartReplica) CollationCoercibility(ctx *sql.Context) (collation sql.Coll
 // StopReplica is the plan node for the "STOP REPLICA" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/stop-replica.html
 type StopReplica struct {
-	replicaController binlogreplication.BinlogReplicaController
+	ReplicaController binlogreplication.BinlogReplicaController
 }
 
 var _ sql.Node = (*StopReplica)(nil)
@@ -279,12 +259,16 @@ func NewStopReplica() *StopReplica {
 // WithBinlogReplicaController implements the BinlogReplicaControllerCommand interface.
 func (s *StopReplica) WithBinlogReplicaController(controller binlogreplication.BinlogReplicaController) sql.Node {
 	nc := *s
-	nc.replicaController = controller
+	nc.ReplicaController = controller
 	return &nc
 }
 
 func (s *StopReplica) Resolved() bool {
 	return true
+}
+
+func (s *StopReplica) IsReadOnly() bool {
+	return false
 }
 
 func (s *StopReplica) String() string {
@@ -299,15 +283,6 @@ func (s *StopReplica) Children() []sql.Node {
 	return nil
 }
 
-func (s *StopReplica) RowIter(ctx *sql.Context, _ sql.Row) (sql.RowIter, error) {
-	if s.replicaController == nil {
-		return nil, ErrNoReplicationController.New()
-	}
-
-	err := s.replicaController.StopReplica(ctx)
-	return sql.RowsToRowIter(), err
-}
-
 func (s *StopReplica) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 0 {
 		return nil, sql.ErrInvalidChildrenNumber.New(s, len(children), 0)
@@ -315,11 +290,6 @@ func (s *StopReplica) WithChildren(children ...sql.Node) (sql.Node, error) {
 
 	newNode := *s
 	return &newNode, nil
-}
-
-func (s *StopReplica) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewDynamicPrivilegedOperation(DynamicPrivilege_ReplicationSlaveAdmin))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -330,7 +300,7 @@ func (*StopReplica) CollationCoercibility(ctx *sql.Context) (collation sql.Colla
 // ResetReplica is a plan node for the "RESET REPLICA" statement.
 // https://dev.mysql.com/doc/refman/8.0/en/reset-replica.html
 type ResetReplica struct {
-	replicaController binlogreplication.BinlogReplicaController
+	ReplicaController binlogreplication.BinlogReplicaController
 	All               bool
 }
 
@@ -347,12 +317,16 @@ func NewResetReplica(all bool) *ResetReplica {
 // WithBinlogReplicaController implements the BinlogReplicaControllerCommand interface.
 func (r *ResetReplica) WithBinlogReplicaController(controller binlogreplication.BinlogReplicaController) sql.Node {
 	nc := *r
-	nc.replicaController = controller
+	nc.ReplicaController = controller
 	return &nc
 }
 
 func (r *ResetReplica) Resolved() bool {
 	return true
+}
+
+func (r *ResetReplica) IsReadOnly() bool {
+	return false
 }
 
 func (r *ResetReplica) String() string {
@@ -372,15 +346,6 @@ func (r *ResetReplica) Children() []sql.Node {
 	return nil
 }
 
-func (r *ResetReplica) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	if r.replicaController == nil {
-		return nil, ErrNoReplicationController.New()
-	}
-
-	err := r.replicaController.ResetReplica(ctx, r.All)
-	return sql.RowsToRowIter(), err
-}
-
 func (r *ResetReplica) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 0 {
 		return nil, sql.ErrInvalidChildrenNumber.New(r, len(children), 0)
@@ -388,11 +353,6 @@ func (r *ResetReplica) WithChildren(children ...sql.Node) (sql.Node, error) {
 
 	newNode := *r
 	return &newNode, nil
-}
-
-func (r *ResetReplica) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation("", "", "", sql.PrivilegeType_Reload))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

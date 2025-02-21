@@ -18,7 +18,6 @@ type AnyValue struct {
 var _ sql.FunctionExpression = (*AnyValue)(nil)
 var _ sql.Aggregation = (*AnyValue)(nil)
 var _ sql.WindowAdaptableExpression = (*AnyValue)(nil)
-var _ sql.CollationCoercible = (*AnyValue)(nil)
 
 func NewAnyValue(e sql.Expression) *AnyValue {
 	return &AnyValue{
@@ -60,14 +59,19 @@ func (a *AnyValue) DebugString() string {
 	return fmt.Sprintf("ANYVALUE(%s)", sql.DebugString(a.Child))
 }
 
-func (a *AnyValue) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &AnyValue{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *AnyValue) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &AnyValue{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *AnyValue) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &AnyValue{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *AnyValue) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &AnyValue{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *AnyValue) NewBuffer() (sql.AggregationBuffer, error) {
@@ -93,7 +97,6 @@ type Avg struct {
 var _ sql.FunctionExpression = (*Avg)(nil)
 var _ sql.Aggregation = (*Avg)(nil)
 var _ sql.WindowAdaptableExpression = (*Avg)(nil)
-var _ sql.CollationCoercible = (*Avg)(nil)
 
 func NewAvg(e sql.Expression) *Avg {
 	return &Avg{
@@ -135,14 +138,19 @@ func (a *Avg) DebugString() string {
 	return fmt.Sprintf("AVG(%s)", sql.DebugString(a.Child))
 }
 
-func (a *Avg) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &Avg{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *Avg) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &Avg{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Avg) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &Avg{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *Avg) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &Avg{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Avg) NewBuffer() (sql.AggregationBuffer, error) {
@@ -168,7 +176,6 @@ type BitAnd struct {
 var _ sql.FunctionExpression = (*BitAnd)(nil)
 var _ sql.Aggregation = (*BitAnd)(nil)
 var _ sql.WindowAdaptableExpression = (*BitAnd)(nil)
-var _ sql.CollationCoercible = (*BitAnd)(nil)
 
 func NewBitAnd(e sql.Expression) *BitAnd {
 	return &BitAnd{
@@ -210,14 +217,19 @@ func (a *BitAnd) DebugString() string {
 	return fmt.Sprintf("BITAND(%s)", sql.DebugString(a.Child))
 }
 
-func (a *BitAnd) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &BitAnd{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *BitAnd) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &BitAnd{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *BitAnd) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &BitAnd{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *BitAnd) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &BitAnd{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *BitAnd) NewBuffer() (sql.AggregationBuffer, error) {
@@ -243,7 +255,6 @@ type BitOr struct {
 var _ sql.FunctionExpression = (*BitOr)(nil)
 var _ sql.Aggregation = (*BitOr)(nil)
 var _ sql.WindowAdaptableExpression = (*BitOr)(nil)
-var _ sql.CollationCoercible = (*BitOr)(nil)
 
 func NewBitOr(e sql.Expression) *BitOr {
 	return &BitOr{
@@ -285,14 +296,19 @@ func (a *BitOr) DebugString() string {
 	return fmt.Sprintf("BITOR(%s)", sql.DebugString(a.Child))
 }
 
-func (a *BitOr) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &BitOr{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *BitOr) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &BitOr{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *BitOr) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &BitOr{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *BitOr) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &BitOr{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *BitOr) NewBuffer() (sql.AggregationBuffer, error) {
@@ -318,7 +334,6 @@ type BitXor struct {
 var _ sql.FunctionExpression = (*BitXor)(nil)
 var _ sql.Aggregation = (*BitXor)(nil)
 var _ sql.WindowAdaptableExpression = (*BitXor)(nil)
-var _ sql.CollationCoercible = (*BitXor)(nil)
 
 func NewBitXor(e sql.Expression) *BitXor {
 	return &BitXor{
@@ -360,14 +375,19 @@ func (a *BitXor) DebugString() string {
 	return fmt.Sprintf("BITXOR(%s)", sql.DebugString(a.Child))
 }
 
-func (a *BitXor) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &BitXor{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *BitXor) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &BitXor{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *BitXor) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &BitXor{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *BitXor) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &BitXor{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *BitXor) NewBuffer() (sql.AggregationBuffer, error) {
@@ -393,7 +413,6 @@ type Count struct {
 var _ sql.FunctionExpression = (*Count)(nil)
 var _ sql.Aggregation = (*Count)(nil)
 var _ sql.WindowAdaptableExpression = (*Count)(nil)
-var _ sql.CollationCoercible = (*Count)(nil)
 
 func NewCount(e sql.Expression) *Count {
 	return &Count{
@@ -435,14 +454,19 @@ func (a *Count) DebugString() string {
 	return fmt.Sprintf("COUNT(%s)", sql.DebugString(a.Child))
 }
 
-func (a *Count) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &Count{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *Count) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &Count{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Count) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &Count{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *Count) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &Count{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Count) NewBuffer() (sql.AggregationBuffer, error) {
@@ -468,7 +492,6 @@ type First struct {
 var _ sql.FunctionExpression = (*First)(nil)
 var _ sql.Aggregation = (*First)(nil)
 var _ sql.WindowAdaptableExpression = (*First)(nil)
-var _ sql.CollationCoercible = (*First)(nil)
 
 func NewFirst(e sql.Expression) *First {
 	return &First{
@@ -510,14 +533,19 @@ func (a *First) DebugString() string {
 	return fmt.Sprintf("FIRST(%s)", sql.DebugString(a.Child))
 }
 
-func (a *First) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &First{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *First) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &First{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *First) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &First{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *First) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &First{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *First) NewBuffer() (sql.AggregationBuffer, error) {
@@ -543,7 +571,6 @@ type JsonArray struct {
 var _ sql.FunctionExpression = (*JsonArray)(nil)
 var _ sql.Aggregation = (*JsonArray)(nil)
 var _ sql.WindowAdaptableExpression = (*JsonArray)(nil)
-var _ sql.CollationCoercible = (*JsonArray)(nil)
 
 func NewJsonArray(e sql.Expression) *JsonArray {
 	return &JsonArray{
@@ -585,14 +612,19 @@ func (a *JsonArray) DebugString() string {
 	return fmt.Sprintf("JSON_ARRAYAGG(%s)", sql.DebugString(a.Child))
 }
 
-func (a *JsonArray) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &JsonArray{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *JsonArray) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &JsonArray{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *JsonArray) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &JsonArray{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *JsonArray) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &JsonArray{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *JsonArray) NewBuffer() (sql.AggregationBuffer, error) {
@@ -618,7 +650,6 @@ type Last struct {
 var _ sql.FunctionExpression = (*Last)(nil)
 var _ sql.Aggregation = (*Last)(nil)
 var _ sql.WindowAdaptableExpression = (*Last)(nil)
-var _ sql.CollationCoercible = (*Last)(nil)
 
 func NewLast(e sql.Expression) *Last {
 	return &Last{
@@ -660,14 +691,19 @@ func (a *Last) DebugString() string {
 	return fmt.Sprintf("LAST(%s)", sql.DebugString(a.Child))
 }
 
-func (a *Last) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &Last{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *Last) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &Last{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Last) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &Last{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *Last) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &Last{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Last) NewBuffer() (sql.AggregationBuffer, error) {
@@ -693,7 +729,6 @@ type Max struct {
 var _ sql.FunctionExpression = (*Max)(nil)
 var _ sql.Aggregation = (*Max)(nil)
 var _ sql.WindowAdaptableExpression = (*Max)(nil)
-var _ sql.CollationCoercible = (*Max)(nil)
 
 func NewMax(e sql.Expression) *Max {
 	return &Max{
@@ -735,14 +770,19 @@ func (a *Max) DebugString() string {
 	return fmt.Sprintf("MAX(%s)", sql.DebugString(a.Child))
 }
 
-func (a *Max) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &Max{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *Max) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &Max{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Max) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &Max{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *Max) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &Max{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Max) NewBuffer() (sql.AggregationBuffer, error) {
@@ -768,7 +808,6 @@ type Min struct {
 var _ sql.FunctionExpression = (*Min)(nil)
 var _ sql.Aggregation = (*Min)(nil)
 var _ sql.WindowAdaptableExpression = (*Min)(nil)
-var _ sql.CollationCoercible = (*Min)(nil)
 
 func NewMin(e sql.Expression) *Min {
 	return &Min{
@@ -810,14 +849,19 @@ func (a *Min) DebugString() string {
 	return fmt.Sprintf("MIN(%s)", sql.DebugString(a.Child))
 }
 
-func (a *Min) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &Min{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *Min) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &Min{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Min) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &Min{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *Min) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &Min{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Min) NewBuffer() (sql.AggregationBuffer, error) {
@@ -843,7 +887,6 @@ type Sum struct {
 var _ sql.FunctionExpression = (*Sum)(nil)
 var _ sql.Aggregation = (*Sum)(nil)
 var _ sql.WindowAdaptableExpression = (*Sum)(nil)
-var _ sql.CollationCoercible = (*Sum)(nil)
 
 func NewSum(e sql.Expression) *Sum {
 	return &Sum{
@@ -885,14 +928,19 @@ func (a *Sum) DebugString() string {
 	return fmt.Sprintf("SUM(%s)", sql.DebugString(a.Child))
 }
 
-func (a *Sum) WithWindow(window *sql.WindowDefinition) (sql.Aggregation, error) {
-	res, err := a.unaryAggBase.WithWindow(window)
-	return &Sum{unaryAggBase: *res.(*unaryAggBase)}, err
+func (a *Sum) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
+	res := a.unaryAggBase.WithWindow(window)
+	return &Sum{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Sum) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	res, err := a.unaryAggBase.WithChildren(children...)
 	return &Sum{unaryAggBase: *res.(*unaryAggBase)}, err
+}
+
+func (a *Sum) WithId(id sql.ColumnId) sql.IdExpression {
+	res := a.unaryAggBase.WithId(id)
+	return &Sum{unaryAggBase: *res.(*unaryAggBase)}
 }
 
 func (a *Sum) NewBuffer() (sql.AggregationBuffer, error) {
