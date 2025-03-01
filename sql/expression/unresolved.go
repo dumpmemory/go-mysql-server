@@ -115,12 +115,14 @@ var _ sql.TableFunction = (*UnresolvedTableFunction)(nil)
 // intended to be used.
 type UnresolvedTableFunction struct {
 	name      string
+	Alias     string
 	Arguments []sql.Expression
 	database  sql.Database
 }
 
 var _ sql.Node = (*UnresolvedTableFunction)(nil)
 var _ sql.CollationCoercible = (*UnresolvedTableFunction)(nil)
+var _ sql.RenameableNode = (*UnresolvedTableFunction)(nil)
 
 // NewUnresolvedTableFunction creates a new UnresolvedTableFunction node for a sql plan.
 func NewUnresolvedTableFunction(name string, arguments []sql.Expression) *UnresolvedTableFunction {
@@ -128,6 +130,12 @@ func NewUnresolvedTableFunction(name string, arguments []sql.Expression) *Unreso
 		name:      name,
 		Arguments: arguments,
 	}
+}
+
+func (utf *UnresolvedTableFunction) WithName(s string) sql.Node {
+	ret := *utf
+	ret.name = s
+	return &ret
 }
 
 // NewInstance implements the TableFunction interface
@@ -154,6 +162,10 @@ func (utf *UnresolvedTableFunction) Name() string {
 // Expressions implements the Expressioner interface
 func (utf *UnresolvedTableFunction) Expressions() []sql.Expression {
 	return utf.Arguments
+}
+
+func (utf *UnresolvedTableFunction) IsReadOnly() bool {
+	return true
 }
 
 // WithExpressions implements the Expressioner interface
@@ -189,12 +201,6 @@ func (utf *UnresolvedTableFunction) RowIter(ctx *sql.Context, row sql.Row) (sql.
 // WithChildren implements the Node interface
 func (utf *UnresolvedTableFunction) WithChildren(node ...sql.Node) (sql.Node, error) {
 	panic("no expected children for unresolved table function")
-}
-
-// CheckPrivileges implements the Node interface
-func (utf UnresolvedTableFunction) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	panic("attempting to check privileges on an unresolved table function")
-	return false
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

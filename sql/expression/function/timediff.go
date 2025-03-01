@@ -29,7 +29,7 @@ import (
 
 // TimeDiff subtracts the second argument from the first expressed as a time value.
 type TimeDiff struct {
-	expression.BinaryExpression
+	expression.BinaryExpressionStub
 }
 
 var _ sql.FunctionExpression = (*TimeDiff)(nil)
@@ -38,9 +38,9 @@ var _ sql.CollationCoercible = (*TimeDiff)(nil)
 // NewTimeDiff creates a new NewTimeDiff expression.
 func NewTimeDiff(e1, e2 sql.Expression) sql.Expression {
 	return &TimeDiff{
-		expression.BinaryExpression{
-			Left:  e1,
-			Right: e2,
+		expression.BinaryExpressionStub{
+			LeftChild:  e1,
+			RightChild: e2,
 		},
 	}
 }
@@ -64,7 +64,7 @@ func (*TimeDiff) CollationCoercibility(ctx *sql.Context) (collation sql.Collatio
 }
 
 func (td *TimeDiff) String() string {
-	return fmt.Sprintf("%s(%s,%s)", td.FunctionName(), td.Left, td.Right)
+	return fmt.Sprintf("%s(%s,%s)", td.FunctionName(), td.LeftChild, td.RightChild)
 }
 
 // WithChildren implements the Expression interface.
@@ -76,11 +76,11 @@ func (td *TimeDiff) WithChildren(children ...sql.Expression) (sql.Expression, er
 }
 
 func convToDateOrTime(val interface{}) (interface{}, error) {
-	date, err := types.Datetime.Convert(val)
+	date, _, err := types.DatetimeMaxPrecision.Convert(val)
 	if err == nil {
 		return date, nil
 	}
-	tim, err := types.Time.Convert(val)
+	tim, _, err := types.Time.Convert(val)
 	if err == nil {
 		return tim, err
 	}
@@ -89,16 +89,16 @@ func convToDateOrTime(val interface{}) (interface{}, error) {
 
 // Eval implements the Expression interface.
 func (td *TimeDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	if td.Left == nil || td.Right == nil {
+	if td.LeftChild == nil || td.RightChild == nil {
 		return nil, nil
 	}
 
-	left, err := td.Left.Eval(ctx, row)
+	left, err := td.LeftChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
 
-	right, err := td.Right.Eval(ctx, row)
+	right, err := td.RightChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,8 @@ func (td *TimeDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		if leftDatetime.Location() != rightDatetime.Location() {
 			rightDatetime = rightDatetime.In(leftDatetime.Location())
 		}
-		return types.Time.Convert(leftDatetime.Sub(rightDatetime))
+		ret, _, err := types.Time.Convert(leftDatetime.Sub(rightDatetime))
+		return ret, err
 	}
 
 	// handle as time
@@ -148,7 +149,7 @@ func (td *TimeDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 
 // DateDiff returns expr1 − expr2 expressed as a value in days from one date to the other.
 type DateDiff struct {
-	expression.BinaryExpression
+	expression.BinaryExpressionStub
 }
 
 var _ sql.FunctionExpression = (*DateDiff)(nil)
@@ -157,9 +158,9 @@ var _ sql.CollationCoercible = (*DateDiff)(nil)
 // NewDateDiff creates a new DATEDIFF() function.
 func NewDateDiff(expr1, expr2 sql.Expression) sql.Expression {
 	return &DateDiff{
-		expression.BinaryExpression{
-			Left:  expr1,
-			Right: expr2,
+		expression.BinaryExpressionStub{
+			LeftChild:  expr1,
+			RightChild: expr2,
 		},
 	}
 }
@@ -192,11 +193,11 @@ func (d *DateDiff) WithChildren(children ...sql.Expression) (sql.Expression, err
 
 // Eval implements the sql.Expression interface.
 func (d *DateDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	if d.Left == nil || d.Right == nil {
+	if d.LeftChild == nil || d.RightChild == nil {
 		return nil, nil
 	}
 
-	expr1, err := d.Left.Eval(ctx, row)
+	expr1, err := d.LeftChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -204,15 +205,15 @@ func (d *DateDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	expr1, err = types.Datetime.Convert(expr1)
+	expr1, _, err = types.DatetimeMaxPrecision.Convert(expr1)
 	if err != nil {
 		return nil, err
 	}
 
 	expr1str := expr1.(time.Time).String()[:10]
-	expr1, _ = types.Datetime.Convert(expr1str)
+	expr1, _, _ = types.DatetimeMaxPrecision.Convert(expr1str)
 
-	expr2, err := d.Right.Eval(ctx, row)
+	expr2, err := d.RightChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -220,13 +221,13 @@ func (d *DateDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	expr2, err = types.Datetime.Convert(expr2)
+	expr2, _, err = types.DatetimeMaxPrecision.Convert(expr2)
 	if err != nil {
 		return nil, err
 	}
 
 	expr2str := expr2.(time.Time).String()[:10]
-	expr2, _ = types.Datetime.Convert(expr2str)
+	expr2, _, _ = types.DatetimeMaxPrecision.Convert(expr2str)
 
 	date1 := expr1.(time.Time)
 	date2 := expr2.(time.Time)
@@ -237,7 +238,7 @@ func (d *DateDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 }
 
 func (d *DateDiff) String() string {
-	return fmt.Sprintf("DATEDIFF(%s, %s)", d.Left, d.Right)
+	return fmt.Sprintf("DATEDIFF(%s, %s)", d.LeftChild, d.RightChild)
 }
 
 // TimestampDiff returns expr1 − expr2 expressed as a value in unit specified.
@@ -321,12 +322,12 @@ func (t *TimestampDiff) Eval(ctx *sql.Context, row sql.Row) (interface{}, error)
 		return nil, nil
 	}
 
-	expr1, err = types.Datetime.Convert(expr1)
+	expr1, _, err = types.DatetimeMaxPrecision.Convert(expr1)
 	if err != nil {
 		return nil, err
 	}
 
-	expr2, err = types.Datetime.Convert(expr2)
+	expr2, _, err = types.DatetimeMaxPrecision.Convert(expr2)
 	if err != nil {
 		return nil, err
 	}

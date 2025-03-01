@@ -18,9 +18,22 @@ import (
 	"math"
 
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 var VariableQueries = []ScriptTest{
+	{
+		Name:        "use string name for foreign_key checks",
+		SetUpScript: []string{},
+		Query:       "select @@GLOBAL.unknown",
+		ExpectedErr: sql.ErrUnknownSystemVariable,
+	},
+	{
+		Name:        "use string name for foreign_key checks",
+		SetUpScript: []string{},
+		Query:       "set @@foreign_key_checks = off;",
+		Expected:    []sql.Row{{}},
+	},
 	{
 		Name: "set system variables",
 		SetUpScript: []string{
@@ -49,11 +62,56 @@ var VariableQueries = []ScriptTest{
 		},
 	},
 	{
+		Name: "variable scope is included in returned column name when explicitly provided",
+		Assertions: []ScriptTestAssertion{
+			{
+				Query:    "select @@max_allowed_packet;",
+				Expected: []sql.Row{{1073741824}},
+				ExpectedColumns: sql.Schema{
+					{
+						Name: "@@max_allowed_packet",
+						Type: types.Uint64,
+					},
+				},
+			},
+			{
+				Query:    "select @@session.max_allowed_packet;",
+				Expected: []sql.Row{{1073741824}},
+				ExpectedColumns: sql.Schema{
+					{
+						Name: "@@session.max_allowed_packet",
+						Type: types.Uint64,
+					},
+				},
+			},
+			{
+				Query:    "select @@global.max_allowed_packet;",
+				Expected: []sql.Row{{1073741824}},
+				ExpectedColumns: sql.Schema{
+					{
+						Name: "@@global.max_allowed_packet",
+						Type: types.Uint64,
+					},
+				},
+			},
+			{
+				Query:    "select @@GLoBAL.max_allowed_packet;",
+				Expected: []sql.Row{{1073741824}},
+				ExpectedColumns: sql.Schema{
+					{
+						Name: "@@GLoBAL.max_allowed_packet",
+						Type: types.Uint64,
+					},
+				},
+			},
+		},
+	},
+	{
 		Name: "@@server_id",
 		Assertions: []ScriptTestAssertion{
 			{
 				Query:    "select @@server_id;",
-				Expected: []sql.Row{{0}},
+				Expected: []sql.Row{{uint32(1)}},
 			},
 			{
 				Query:    "set @@server_id=123;",
@@ -61,6 +119,10 @@ var VariableQueries = []ScriptTest{
 			},
 			{
 				Query:    "set @@GLOBAL.server_id=123;",
+				Expected: []sql.Row{{}},
+			},
+			{
+				Query:    "set @@GLOBAL.server_id=0;",
 				Expected: []sql.Row{{}},
 			},
 		},
@@ -155,8 +217,8 @@ var VariableQueries = []ScriptTest{
 	{
 		Name: "set system variable with expressions",
 		SetUpScript: []string{
-			`set lc_messages = "123", @@auto_increment_increment = 1`,
-			`set lc_messages = concat(@@lc_messages, "456"), @@auto_increment_increment = @@auto_increment_increment + 3`,
+			`set lc_messages = '123', @@auto_increment_increment = 1`,
+			`set lc_messages = concat(@@lc_messages, '456'), @@auto_increment_increment = @@auto_increment_increment + 3`,
 		},
 		Query: "SELECT @@lc_messages, @@auto_increment_increment",
 		Expected: []sql.Row{
@@ -228,6 +290,7 @@ var VariableQueries = []ScriptTest{
 	{
 		Name: "set multiple variables including 'names'",
 		SetUpScript: []string{
+			"set SESSION sql_mode = 'ANSI'",
 			`SET sql_mode=(SELECT CONCAT(@@sql_mode, ',PIPES_AS_CONCAT,NO_ENGINE_SUBSTITUTION')), time_zone='+00:00', NAMES utf8mb3 COLLATE utf8mb3_bin;`,
 		},
 		Query: "SELECT @@sql_mode, @@time_zone, @@character_set_client, @@character_set_connection, @@character_set_results",
@@ -266,6 +329,16 @@ var VariableQueries = []ScriptTest{
 		},
 	},
 	{
+		Name: "set system variable to no_auto_create_user, which has been deprecated",
+		SetUpScript: []string{
+			`set sql_mode = NO_AUTO_CREATE_USER`,
+		},
+		Query: "SELECT @@sql_mode",
+		Expected: []sql.Row{
+			{"NO_AUTO_CREATE_USER"},
+		},
+	},
+	{
 		Name: "set sql_mode variable from mysqldump",
 		SetUpScript: []string{
 			`SET sql_mode = 'STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,TRADITIONAL,NO_ENGINE_SUBSTITUTION'`,
@@ -273,6 +346,57 @@ var VariableQueries = []ScriptTest{
 		Query: "SELECT @@sql_mode",
 		Expected: []sql.Row{
 			{"ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_ZERO_DATE,NO_ZERO_IN_DATE,STRICT_ALL_TABLES,STRICT_TRANS_TABLES,TRADITIONAL"},
+		},
+	},
+	{
+		Name: "set sql_mode variable ignores empty strings",
+		SetUpScript: []string{
+			`SET sql_mode = ',,,,STRICT_TRANS_TABLES,,,,,NO_AUTO_VALUE_ON_ZERO,,,,NO_ENGINE_SUBSTITUTION,,,,,,'`,
+		},
+		Query: "SELECT @@sql_mode",
+		Expected: []sql.Row{
+			{"NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES"},
+		},
+	},
+	{
+		Name: "show variables renders enums after set",
+		SetUpScript: []string{
+			`set @@sql_mode='ONLY_FULL_GROUP_BY';`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: `SHOW VARIABLES LIKE '%sql_mode%'`,
+				Expected: []sql.Row{
+					{"sql_mode", "ONLY_FULL_GROUP_BY"},
+				},
+			},
+		},
+	},
+	{
+		Name:        "innodb autoinc lock mode",
+		SetUpScript: []string{},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: `select @@innodb_autoinc_lock_mode;`,
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Query: `select @@global.innodb_autoinc_lock_mode;`,
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Skip:        true,
+				Query:       `select @@session.innodb_autoinc_lock_mode;`,
+				ExpectedErr: sql.ErrSystemVariableGlobalOnly,
+			},
+			{
+				Query:       `set @@innodb_autoinc_lock_mode = 1;`,
+				ExpectedErr: sql.ErrSystemVariableReadOnly,
+			},
 		},
 	},
 	// User variables
@@ -303,7 +427,7 @@ var VariableQueries = []ScriptTest{
 		},
 		Query: "SELECT @myvar",
 		Expected: []sql.Row{
-			{123.4},
+			{"123.4"},
 		},
 	},
 	{
@@ -313,7 +437,7 @@ var VariableQueries = []ScriptTest{
 		},
 		Query: "SELECT @myvar, @@auto_increment_increment",
 		Expected: []sql.Row{
-			{123.4, 1234},
+			{"123.4", 1234},
 		},
 	},
 	{

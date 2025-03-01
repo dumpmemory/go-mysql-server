@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/src-d/go-errors.v1"
 
+	gmstime "github.com/dolthub/go-mysql-server/internal/time"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/types"
@@ -47,9 +48,11 @@ func getDate(ctx *sql.Context,
 		return nil, nil
 	}
 
-	date, err := types.Datetime.ConvertWithoutRangeCheck(val)
+	date, err := types.DatetimeMaxPrecision.ConvertWithoutRangeCheck(val)
 	if err != nil {
-		date = types.Datetime.Zero().(time.Time)
+		ctx.Warn(1292, "Incorrect datetime value: '%s'", val)
+		return nil, nil
+		//date = types.DatetimeMaxPrecision.Zero().(time.Time)
 	}
 
 	return date, nil
@@ -112,6 +115,60 @@ func (y *Year) WithChildren(children ...sql.Expression) (sql.Expression, error) 
 		return nil, sql.ErrInvalidChildrenNumber.New(y, len(children), 1)
 	}
 	return NewYear(children[0]), nil
+}
+
+type Quarter struct {
+	expression.UnaryExpression
+}
+
+var _ sql.FunctionExpression = (*Quarter)(nil)
+var _ sql.CollationCoercible = (*Quarter)(nil)
+
+// NewQuarter creates a new Month UDF.
+func NewQuarter(date sql.Expression) sql.Expression {
+	return &Quarter{expression.UnaryExpression{Child: date}}
+}
+
+// FunctionName implements sql.FunctionExpression
+func (q *Quarter) FunctionName() string {
+	return "quarter"
+}
+
+// Description implements sql.FunctionExpression
+func (q *Quarter) Description() string {
+	return "returns the quarter of the given date."
+}
+
+func (q *Quarter) String() string { return fmt.Sprintf("%s(%s)", q.FunctionName(), q.Child) }
+
+// Type implements the Expression interface.
+func (q *Quarter) Type() sql.Type { return types.Int32 }
+
+// CollationCoercibility implements the interface sql.CollationCoercible.
+func (q *Quarter) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+	return sql.Collation_binary, 5
+}
+
+// Eval implements the Expression interface.
+func (q *Quarter) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	mon, err := getDatePart(ctx, q.UnaryExpression, row, month)
+	if err != nil {
+		return nil, err
+	}
+
+	if mon == nil {
+		return nil, nil
+	}
+
+	return (mon.(int32)-1)/3 + 1, nil
+}
+
+// WithChildren implements the Expression interface.
+func (q *Quarter) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	if len(children) != 1 {
+		return nil, sql.ErrInvalidChildrenNumber.New(q, len(children), 1)
+	}
+	return NewQuarter(children[0]), nil
 }
 
 // Month is a function that returns the month of a date.
@@ -549,6 +606,9 @@ func (d *YearWeek) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	if date == nil {
+		return nil, nil
+	}
 	yyyy, ok := year(date).(int32)
 	if !ok {
 		return nil, sql.ErrInvalidArgumentDetails.New("YEARWEEK", "invalid year")
@@ -568,7 +628,7 @@ func (d *YearWeek) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, err
 	}
 	if val != nil {
-		if i64, err := types.Int64.Convert(val); err == nil {
+		if i64, _, err := types.Int64.Convert(val); err == nil {
 			if mode, ok = i64.(int64); ok {
 				mode %= 8 // mode in [0, 7]
 			}
@@ -670,7 +730,7 @@ func (d *Week) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, err
 	}
 	if val != nil {
-		if i64, err := types.Int64.Convert(val); err == nil {
+		if i64, _, err := types.Int64.Convert(val); err == nil {
 			if mode, ok = i64.(int64); ok {
 				mode %= 8 // mode in [0, 7]
 			}
@@ -818,9 +878,17 @@ var (
 	dayOfYear = datePartFunc((time.Time).YearDay)
 )
 
+const maxCurrTimestampPrecision = 6
+
 // Now is a function that returns the current time.
 type Now struct {
-	precision *int
+	// prec stores the requested precision for fractional seconds.
+	prec sql.Expression
+	// alwaysUseExactTime controls whether the NOW() function gets the current time, or
+	// uses a cached value that records the starting time of the query. By default, a
+	// cached time is used, but in some cases (such as the SYSDATE() function), the func
+	// needs to always return the exact current time of each function invocation().
+	alwaysUseExactTime bool
 }
 
 func (n *Now) IsNonDeterministic() bool {
@@ -832,33 +900,12 @@ var _ sql.CollationCoercible = (*Now)(nil)
 
 // NewNow returns a new Now node.
 func NewNow(args ...sql.Expression) (sql.Expression, error) {
-	var precision *int
-	if len(args) > 1 {
-		return nil, sql.ErrInvalidArgumentNumber.New("TIMESTAMP", 1, len(args))
-	} else if len(args) == 1 {
-		argType := args[0].Type().Promote()
-		if argType != types.Int64 && argType != types.Uint64 {
-			return nil, sql.ErrInvalidType.New(args[0].Type().String())
-		}
-		// todo: making a context here is expensive
-		val, err := args[0].Eval(sql.NewEmptyContext(), nil)
-		if err != nil {
-			return nil, err
-		}
-		precisionArg, err := types.Int32.Convert(val)
-
-		if err != nil {
-			return nil, err
-		}
-
-		n := int(precisionArg.(int32))
-		if n < 0 || n > 6 {
-			return nil, sql.ErrValueOutOfRange.New("precision", "now")
-		}
-		precision = &n
+	n := &Now{}
+	// parser should make it impossible to pass in more than one argument
+	if len(args) > 0 {
+		n.prec = args[0]
 	}
-
-	return &Now{precision}, nil
+	return n, nil
 }
 
 func subSecondPrecision(t time.Time, precision int) string {
@@ -901,7 +948,11 @@ func (n *Now) Description() string {
 
 // Type implements the sql.Expression interface.
 func (n *Now) Type() sql.Type {
-	return types.Datetime
+	// TODO: precision
+	if n.prec == nil {
+		return types.Datetime
+	}
+	return types.DatetimeMaxPrecision
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -909,44 +960,150 @@ func (*Now) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, 
 	return sql.Collation_binary, 5
 }
 
+// String implements the sql.Expression interface.
 func (n *Now) String() string {
-	if n.precision == nil {
+	if n.prec == nil {
 		return "NOW()"
 	}
 
-	return fmt.Sprintf("NOW(%d)", *n.precision)
+	return fmt.Sprintf("NOW(%s)", n.prec.String())
 }
 
 // IsNullable implements the sql.Expression interface.
 func (n *Now) IsNullable() bool { return false }
 
 // Resolved implements the sql.Expression interface.
-func (n *Now) Resolved() bool { return true }
+func (n *Now) Resolved() bool {
+	if n.prec == nil {
+		return true
+	}
+	return n.prec.Resolved()
+}
 
 // Children implements the sql.Expression interface.
-func (n *Now) Children() []sql.Expression { return nil }
+func (n *Now) Children() []sql.Expression {
+	if n.prec == nil {
+		return nil
+	}
+	return []sql.Expression{n.prec}
+}
 
 // Eval implements the sql.Expression interface.
-func (n *Now) Eval(ctx *sql.Context, _ sql.Row) (interface{}, error) {
-	t := ctx.QueryTime()
-	// TODO: Now should return a string formatted depending on context.  This code handles string formatting
-	// and should be enabled at the time we fix the return type
-	/*s, err := formatDate("%Y-%m-%d %H:%i:%s", t)
+func (n *Now) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	// Cannot evaluate with nil context
+	if ctx == nil {
+		return nil, fmt.Errorf("cannot Eval Now with nil context")
+	}
 
+	// The timestamp must be in the session time zone
+	sessionTimeZone, err := SessionTimeZone(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	if n.precision != nil {
-		s += subSecondPrecision(t, *n.precision)
-	}*/
+	// For NOW(), we use the cached QueryTime, so that all NOW() calls in a query return the same value.
+	// SYSDATE() requires that we use the *exact* current time, and not use the cached version.
+	currentTime := ctx.QueryTime()
+	if n.alwaysUseExactTime {
+		currentTime = sql.Now()
+	}
 
-	return t, nil
+	// If no arguments, just return with 0 precision
+	// The way the parser is implemented 0 should always be passed in; have this here just in case
+	if n.prec == nil {
+		t, ok := gmstime.ConvertTimeZone(currentTime, gmstime.SystemTimezoneOffset(), sessionTimeZone)
+		if !ok {
+			return nil, fmt.Errorf("invalid time zone: %s", sessionTimeZone)
+		}
+		tt := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
+		return tt, nil
+	}
+
+	// Should syntax error before this; check anyway
+	if types.IsNull(n.prec) {
+		return nil, ErrTimeUnexpectedlyNil.New(n.FunctionName())
+	}
+
+	// Evaluate precision
+	prec, err := n.prec.Eval(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+
+	// Should syntax error before this; check anyway
+	if prec == nil {
+		return nil, ErrTimeUnexpectedlyNil.New(n.FunctionName())
+	}
+
+	// Must receive integer
+	// Should syntax error before this; check anyway
+	fsp, ok := types.CoalesceInt(prec)
+	if !ok {
+		return nil, sql.ErrInvalidArgumentType.New(n.FunctionName())
+	}
+
+	// Parse and return answer
+	if fsp > maxCurrTimestampPrecision {
+		return nil, ErrTooHighPrecision.New(fsp, n.FunctionName(), maxCurrTimestampPrecision)
+	} else if fsp < 0 {
+		// Should syntax error before this; check anyway
+		return nil, sql.ErrInvalidArgumentType.New(n.FunctionName())
+	}
+
+	// Get the timestamp
+	t, ok := gmstime.ConvertTimeZone(currentTime, gmstime.SystemTimezoneOffset(), sessionTimeZone)
+	if !ok {
+		return nil, fmt.Errorf("invalid time zone: %s", sessionTimeZone)
+	}
+
+	// Calculate precision
+	precision := 1
+	for i := 0; i < 9-fsp; i++ {
+		precision *= 10
+	}
+
+	// Round down nano based on precision
+	nano := precision * (t.Nanosecond() / precision)
+
+	// Generate a new timestamp
+	tt := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nano, time.UTC)
+
+	return tt, nil
 }
 
 // WithChildren implements the Expression interface.
 func (n *Now) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 	return NewNow(children...)
+}
+
+// NewSysdate returns a new SYSDATE() function, using the supplied |args| for an
+// optional value for fractional second precision. The SYSDATE() function is a synonym
+// for NOW(), but does NOT use the query's cached start time, and instead always returns
+// the current time, even when executed multiple times in a query or stored procedure.
+// https://dev.mysql.com/doc/refman/8.0/en/date-and-time-functions.html#function_sysdate
+func NewSysdate(args ...sql.Expression) (sql.Expression, error) {
+	n, err := NewNow(args...)
+	n.(*Now).alwaysUseExactTime = true
+	return n, err
+}
+
+// SessionTimeZone returns a MySQL timezone offset string for the value of @@session_time_zone. If the session
+// timezone is set to SYSTEM, then the system timezone offset is calculated and returned.
+func SessionTimeZone(ctx *sql.Context) (string, error) {
+	sessionTimeZoneVar, err := ctx.GetSessionVariable(ctx, "time_zone")
+	if err != nil {
+		return "", err
+	}
+
+	sessionTimeZone, ok := sessionTimeZoneVar.(string)
+	if !ok {
+		return "", fmt.Errorf("invalid type for @@session.time_zone: %T", sessionTimeZoneVar)
+	}
+
+	if sessionTimeZone == "SYSTEM" {
+		sessionTimeZone = gmstime.SystemTimezoneOffset()
+	}
+	return sessionTimeZone, nil
 }
 
 // UTCTimestamp is a function that returns the current time.
@@ -972,7 +1129,7 @@ func NewUTCTimestamp(args ...sql.Expression) (sql.Expression, error) {
 		if err != nil {
 			return nil, err
 		}
-		precisionArg, err := types.Int32.Convert(val)
+		precisionArg, _, err := types.Int32.Convert(val)
 
 		if err != nil {
 			return nil, err
@@ -1000,7 +1157,7 @@ func (ut *UTCTimestamp) Description() string {
 
 // Type implements the sql.Expression interface.
 func (ut *UTCTimestamp) Type() sql.Type {
-	return types.Datetime
+	return types.DatetimeMaxPrecision
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -1028,8 +1185,10 @@ func (ut *UTCTimestamp) Children() []sql.Expression { return nil }
 // Eval implements the sql.Expression interface.
 func (ut *UTCTimestamp) Eval(ctx *sql.Context, _ sql.Row) (interface{}, error) {
 	t := ctx.QueryTime()
-	// TODO: Now should return a string formatted depending on context.  This code handles string formatting
-	return t.UTC(), nil
+	// TODO: UTC Timestamp needs to also handle precision arguments
+	nano := 1000 * (t.Nanosecond() / 1000)
+	tt := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nano, t.Location())
+	return tt.UTC(), nil
 }
 
 // WithChildren implements the Expression interface.
@@ -1118,7 +1277,8 @@ func (dtf *UnaryDatetimeFunc) EvalChild(ctx *sql.Context, row sql.Row) (interfac
 		return nil, nil
 	}
 
-	return types.Datetime.Convert(val)
+	ret, _, err := types.DatetimeMaxPrecision.Convert(val)
+	return ret, err
 }
 
 // String implements the fmt.Stringer interface.
@@ -1133,13 +1293,13 @@ func (dtf *UnaryDatetimeFunc) Type() sql.Type {
 
 // DayName implements the DAYNAME function
 type DayName struct {
-	*UnaryDatetimeFunc
+	*UnaryFunc
 }
 
 var _ sql.FunctionExpression = (*DayName)(nil)
 
 func NewDayName(arg sql.Expression) sql.Expression {
-	return &DayName{NewUnaryDatetimeFunc(arg, "DAYNAME", types.Text)}
+	return &DayName{NewUnaryFunc(arg, "DAYNAME", types.Text)}
 }
 
 // FunctionName implements sql.FunctionExpression
@@ -1160,10 +1320,24 @@ func (*DayName) CollationCoercibility(ctx *sql.Context) (collation sql.Collation
 func (d *DayName) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	val, err := d.EvalChild(ctx, row)
 	if err != nil {
-		return nil, err
+		ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+		return nil, nil
 	}
 
-	t := val.(time.Time)
+	if s, ok := val.(string); ok {
+		val, _, err = types.DatetimeMaxPrecision.Convert(s)
+		if err != nil {
+			ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+			return nil, nil
+		}
+	}
+
+	t, ok := val.(time.Time)
+	if !ok {
+		ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+		return nil, nil
+	}
+
 	return t.Weekday().String(), nil
 }
 
@@ -1202,8 +1376,15 @@ func (m *Microsecond) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, err
 	}
 
-	t := val.(time.Time)
-	return uint64(t.Nanosecond()) / uint64(time.Microsecond), nil
+	switch v := val.(type) {
+	case time.Time:
+		return uint64(v.Nanosecond()) / uint64(time.Microsecond), nil
+	case nil:
+		return nil, nil
+	default:
+		ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+		return nil, nil
+	}
 }
 
 func (m *Microsecond) WithChildren(children ...sql.Expression) (sql.Expression, error) {
@@ -1241,8 +1422,15 @@ func (d *MonthName) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, err
 	}
 
-	t := val.(time.Time)
-	return t.Month().String(), nil
+	switch v := val.(type) {
+	case time.Time:
+		return v.Month().String(), nil
+	case nil:
+		return nil, nil
+	default:
+		ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+		return nil, nil
+	}
 }
 
 func (d *MonthName) WithChildren(children ...sql.Expression) (sql.Expression, error) {
@@ -1280,8 +1468,15 @@ func (m *TimeToSec) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, err
 	}
 
-	t := val.(time.Time)
-	return uint64(t.Hour()*3600 + t.Minute()*60 + t.Second()), nil
+	switch v := val.(type) {
+	case time.Time:
+		return uint64(v.Hour()*3600 + v.Minute()*60 + v.Second()), nil
+	case nil:
+		return nil, nil
+	default:
+		ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+		return nil, nil
+	}
 }
 
 func (m *TimeToSec) WithChildren(children ...sql.Expression) (sql.Expression, error) {
@@ -1319,9 +1514,16 @@ func (m *WeekOfYear) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, err
 	}
 
-	t := val.(time.Time)
-	_, wk := t.ISOWeek()
-	return wk, nil
+	switch v := val.(type) {
+	case time.Time:
+		_, wk := v.ISOWeek()
+		return wk, nil
+	case nil:
+		return nil, nil
+	default:
+		ctx.Warn(1292, types.ErrConvertingToTime.New(val).Error())
+		return nil, nil
+	}
 }
 
 func (m *WeekOfYear) WithChildren(children ...sql.Expression) (sql.Expression, error) {
@@ -1332,187 +1534,96 @@ func (m *WeekOfYear) WithChildren(children ...sql.Expression) (sql.Expression, e
 }
 
 type CurrTime struct {
-	NoArgFunc
+	prec sql.Expression
 }
 
 func (c CurrTime) IsNonDeterministic() bool {
 	return true
 }
 
-var _ sql.FunctionExpression = CurrTime{}
-var _ sql.CollationCoercible = CurrTime{}
+var _ sql.FunctionExpression = (*CurrTime)(nil)
+var _ sql.CollationCoercible = (*CurrTime)(nil)
+
+func NewCurrTime(args ...sql.Expression) (sql.Expression, error) {
+	c := &CurrTime{}
+	// parser should make it impossible to pass in more than one argument
+	if len(args) > 0 {
+		c.prec = args[0]
+	}
+	return c, nil
+}
+
+// FunctionName implements sql.FunctionExpression
+func (c *CurrTime) FunctionName() string {
+	return "current_time"
+}
 
 // Description implements sql.FunctionExpression
-func (c CurrTime) Description() string {
+func (c *CurrTime) Description() string {
 	return "returns the current time."
 }
 
+// Type implements the sql.Expression interface.
+func (c *CurrTime) Type() sql.Type {
+	return types.Time
+}
+
 // CollationCoercibility implements the interface sql.CollationCoercible.
-func (CurrTime) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+func (*CurrTime) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	return sql.Collation_binary, 5
 }
 
-func NewCurrTime() sql.Expression {
-	return CurrTime{
-		NoArgFunc: NoArgFunc{"curtime", types.LongText},
+// String implements the sql.Expression interface.
+func (c *CurrTime) String() string {
+	if c.prec == nil {
+		return "CURRENT_TIME()"
 	}
+
+	return fmt.Sprintf("CURRENT_TIME(%s)", c.prec.String())
 }
 
-func NewCurrentTime() sql.Expression {
-	return CurrTime{
-		NoArgFunc: NoArgFunc{"current_time", types.LongText},
+// IsNullable implements the sql.Expression interface.
+func (c *CurrTime) IsNullable() bool { return false }
+
+// Resolved implements the sql.Expression interface.
+func (c *CurrTime) Resolved() bool {
+	if c.prec == nil {
+		return true
 	}
+	return c.prec.Resolved()
 }
 
-func currTimeLogic(ctx *sql.Context, _ sql.Row) (interface{}, error) {
-	t := ctx.QueryTime()
-	return fmt.Sprintf("%02d:%02d:%02d", t.Hour(), t.Minute(), t.Second()), nil
+// Children implements the sql.Expression interface.
+func (c *CurrTime) Children() []sql.Expression {
+	if c.prec == nil {
+		return nil
+	}
+	return []sql.Expression{c.prec}
 }
 
 // Eval implements sql.Expression
-func (c CurrTime) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	return currTimeLogic(ctx, row)
-}
-
-// WithChildren implements sql.Expression
-func (c CurrTime) WithChildren(children ...sql.Expression) (sql.Expression, error) {
-	return NoArgFuncWithChildren(c, children)
-}
-
-const maxCurrTimestampPrecision = 6
-
-type CurrTimestamp struct {
-	args []sql.Expression
-}
-
-func (c *CurrTimestamp) IsNonDeterministic() bool {
-	return true
-}
-
-var _ sql.FunctionExpression = (*CurrTimestamp)(nil)
-var _ sql.CollationCoercible = (*CurrTimestamp)(nil)
-
-// FunctionName implements sql.FunctionExpression
-func (c *CurrTimestamp) FunctionName() string {
-	return "current_timestamp"
-}
-
-// CollationCoercibility implements the interface sql.CollationCoercible.
-func (*CurrTimestamp) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
-	return sql.Collation_binary, 5
-}
-
-// Description implements sql.FunctionExpression
-func (c *CurrTimestamp) Description() string {
-	return "returns the current date and time."
-}
-
-func NewCurrTimestamp(args ...sql.Expression) (sql.Expression, error) {
-	return &CurrTimestamp{args}, nil
-}
-
-func (c *CurrTimestamp) String() string {
-	if len(c.args) == 0 {
-		return fmt.Sprintf("CURRENT_TIMESTAMP()")
-	}
-	return fmt.Sprintf("CURRENT_TIMESTAMP(%s)", c.args[0].String())
-}
-
-func (c *CurrTimestamp) Type() sql.Type { return types.Datetime }
-
-func (c *CurrTimestamp) IsNullable() bool {
-	for _, arg := range c.args {
-		if arg.IsNullable() {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *CurrTimestamp) Resolved() bool {
-	for _, arg := range c.args {
-		if !arg.Resolved() {
-			return false
-		}
-	}
-	return true
-}
-
-func (c *CurrTimestamp) WithChildren(children ...sql.Expression) (sql.Expression, error) {
-	if len(children) != len(c.args) {
-		return nil, sql.ErrInvalidChildrenNumber.New(c, len(children), len(c.args))
-	}
-	return NewCurrTimestamp(children...)
-}
-
-func (c *CurrTimestamp) Children() []sql.Expression {
-	return c.args
-}
-
-func (c *CurrTimestamp) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	// If no arguments, just return with 0 precision
-	if len(c.args) == 0 {
-		t := ctx.QueryTime()
-		_t := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, t.Location())
-		return _t, nil
-	}
-
-	// If argument is null
-	if c.args[0] == nil {
-		return nil, ErrTimeUnexpectedlyNil.New(c.FunctionName())
-	}
-
-	// Evaluate value
-	val, err := c.args[0].Eval(ctx, row)
+func (c *CurrTime) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	newNow, err := NewNow(c.prec)
 	if err != nil {
 		return nil, err
 	}
 
-	// If null, throw syntax error
-	if val == nil {
-		return nil, ErrTimeUnexpectedlyNil.New(c.FunctionName())
+	result, err := newNow.Eval(ctx, row)
+	if err != nil {
+		return nil, err
 	}
 
-	// Must receive integer, all other types throw syntax error
-	fsp := 0
-	switch val.(type) {
-	case int:
-		fsp = val.(int)
-	case int8:
-		fsp = int(val.(int8))
-	case int16:
-		fsp = int(val.(int16))
-	case int32:
-		fsp = int(val.(int32))
-	case int64:
-		fsp = int(val.(int64))
-	default:
-		return nil, sql.ErrInvalidArgumentType.New(c.FunctionName())
+	if t, ok := result.(time.Time); ok {
+		// TODO: this is wrong, we need to include nanoseconds
+		return fmt.Sprintf("%02d:%02d:%02d", t.Hour(), t.Minute(), t.Second()), nil
+	} else {
+		return nil, fmt.Errorf("unexpected type %T for NOW() result", result)
 	}
+}
 
-	// Parse and return answer
-	if fsp > maxCurrTimestampPrecision {
-		return nil, ErrTooHighPrecision.New(fsp, c.FunctionName(), maxCurrTimestampPrecision)
-	} else if fsp < 0 {
-		return nil, sql.ErrInvalidArgumentType.New(c.FunctionName())
-	}
-
-	// Get the timestamp
-	t := ctx.QueryTime()
-
-	// Calculate precision
-	prec := 1
-	for i := 0; i < 9-fsp; i++ {
-		prec *= 10
-	}
-
-	// Round down nano based on precision
-	nano := prec * (t.Nanosecond() / prec)
-
-	// Generate a new timestamp
-	_t := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nano, t.Location())
-
-	return _t, nil
+// WithChildren implements sql.Expression
+func (c *CurrTime) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	return NoArgFuncWithChildren(c, children)
 }
 
 // Time is a function takes the Time part out from a datetime expression.
@@ -1520,12 +1631,20 @@ type Time struct {
 	expression.UnaryExpression
 }
 
-var _ sql.Expression = (*Time)(nil)
+var _ sql.FunctionExpression = (*Time)(nil)
 var _ sql.CollationCoercible = (*Time)(nil)
 
 // NewTime returns a new Date node.
 func NewTime(time sql.Expression) sql.Expression {
 	return &Time{expression.UnaryExpression{Child: time}}
+}
+
+func (t *Time) FunctionName() string {
+	return "time"
+}
+
+func (t *Time) Description() string {
+	return "extracts the time part of a time or datetime expression and returns it as a string"
 }
 
 func (t *Time) String() string {
@@ -1553,7 +1672,7 @@ func (t *Time) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	}
 
 	// convert to date
-	date, err := types.Datetime.ConvertWithoutRangeCheck(v)
+	date, err := types.DatetimeMaxPrecision.ConvertWithoutRangeCheck(v)
 	if err == nil {
 		h, m, s := date.Clock()
 		us := date.Nanosecond() / 1000
@@ -1561,7 +1680,7 @@ func (t *Time) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	}
 
 	// convert to time
-	val, err := types.Time.Convert(v)
+	val, _, err := types.Time.Convert(v)
 	if err != nil {
 		ctx.Warn(1292, err.Error())
 		return nil, nil

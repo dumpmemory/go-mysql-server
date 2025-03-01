@@ -44,6 +44,10 @@ func (d *DeclareCondition) Resolved() bool {
 	return true
 }
 
+func (d *DeclareCondition) IsReadOnly() bool {
+	return true
+}
+
 // String implements the sql.Node interface.
 func (d *DeclareCondition) String() string {
 	val := ""
@@ -68,11 +72,6 @@ func (d *DeclareCondition) Children() []sql.Node {
 // WithChildren implements the sql.Node interface.
 func (d *DeclareCondition) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NillaryWithChildren(d, children...)
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (d *DeclareCondition) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return true
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

@@ -40,17 +40,8 @@ func (f *Filter) Resolved() bool {
 	return f.UnaryNode.Child.Resolved() && f.Expression.Resolved()
 }
 
-// RowIter implements the Node interface.
-func (f *Filter) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	span, ctx := ctx.Span("plan.Filter")
-
-	i, err := f.Child.RowIter(ctx, row)
-	if err != nil {
-		span.End()
-		return nil, err
-	}
-
-	return sql.NewSpanIter(span, NewFilterIter(f.Expression, i)), nil
+func (f *Filter) IsReadOnly() bool {
+	return f.Child.IsReadOnly()
 }
 
 // WithChildren implements the Node interface.
@@ -60,11 +51,6 @@ func (f *Filter) WithChildren(children ...sql.Node) (sql.Node, error) {
 	}
 
 	return NewFilter(f.Expression, children[0]), nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (f *Filter) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return f.Child.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -81,20 +67,31 @@ func (f *Filter) WithExpressions(exprs ...sql.Expression) (sql.Node, error) {
 	return NewFilter(exprs[0], f.Child), nil
 }
 
-func (f *Filter) String() string {
+// Describe implements the sql.Describable interface
+func (f *Filter) Describe(options sql.DescribeOptions) string {
 	pr := sql.NewTreePrinter()
 	_ = pr.WriteNode("Filter")
-	children := []string{f.Expression.String(), f.Child.String()}
+	children := []string{sql.Describe(f.Expression, options), sql.Describe(f.Child, options)}
 	_ = pr.WriteChildren(children...)
 	return pr.String()
 }
 
+// String implements the fmt.Stringer interface
+func (f *Filter) String() string {
+	return f.Describe(sql.DescribeOptions{
+		Analyze:   false,
+		Estimates: false,
+		Debug:     false,
+	})
+}
+
+// DebugString implements the sql.DebugStringer interface
 func (f *Filter) DebugString() string {
-	pr := sql.NewTreePrinter()
-	_ = pr.WriteNode("Filter")
-	children := []string{sql.DebugString(f.Expression), sql.DebugString(f.Child)}
-	_ = pr.WriteChildren(children...)
-	return pr.String()
+	return f.Describe(sql.DescribeOptions{
+		Analyze:   false,
+		Estimates: false,
+		Debug:     true,
+	})
 }
 
 // Expressions implements the Expressioner interface.

@@ -30,6 +30,7 @@ type Lag struct {
 	expression.NaryExpression
 	offset int
 	pos    int
+	id     sql.ColumnId
 }
 
 var _ sql.FunctionExpression = (*Lag)(nil)
@@ -61,6 +62,18 @@ func NewLag(e ...sql.Expression) (*Lag, error) {
 		return &Lag{NaryExpression: expression.NaryExpression{ChildExpressions: []sql.Expression{e[0], e[2]}}, offset: offset}, nil
 	}
 	return nil, sql.ErrInvalidArgumentNumber.New("LAG", "1, 2, or 3", len(e))
+}
+
+// Id implements the Aggregation interface
+func (l *Lag) Id() sql.ColumnId {
+	return l.id
+}
+
+// WithId implements the Aggregation interface
+func (l *Lag) WithId(id sql.ColumnId) sql.IdExpression {
+	ret := *l
+	ret.id = id
+	return &ret
 }
 
 // Description implements sql.FunctionExpression
@@ -137,7 +150,7 @@ func (l *Lag) IsNullable() bool {
 
 // Eval implements sql.Expression
 func (l *Lag) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	panic("eval called on window function")
+	return nil, sql.ErrWindowUnsupported.New(l.FunctionName())
 }
 
 // Children implements sql.Expression
@@ -168,10 +181,10 @@ func (l *Lag) WithChildren(children ...sql.Expression) (sql.Expression, error) {
 }
 
 // WithWindow implements sql.WindowAggregation
-func (l *Lag) WithWindow(window *sql.WindowDefinition) (sql.WindowAggregation, error) {
+func (l *Lag) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
 	nl := *l
 	nl.window = window
-	return &nl, nil
+	return &nl
 }
 
 func (l *Lag) NewWindowFunction() (sql.WindowFunction, error) {

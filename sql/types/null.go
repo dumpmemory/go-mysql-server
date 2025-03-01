@@ -40,22 +40,22 @@ func (t nullType) Compare(a interface{}, b interface{}) (int, error) {
 }
 
 // Convert implements Type interface.
-func (t nullType) Convert(v interface{}) (interface{}, error) {
+func (t nullType) Convert(v interface{}) (interface{}, sql.ConvertInRange, error) {
 	if v != nil {
-		return nil, ErrValueNotNil.New(v)
+		return nil, sql.InRange, ErrValueNotNil.New(v)
 	}
 
-	return nil, nil
+	return nil, sql.InRange, nil
 }
 
 // MaxTextResponseByteLength implements the Type interface
-func (t nullType) MaxTextResponseByteLength() uint32 {
+func (t nullType) MaxTextResponseByteLength(*sql.Context) uint32 {
 	return 0
 }
 
 // MustConvert implements the Type interface.
 func (t nullType) MustConvert(v interface{}) interface{} {
-	value, err := t.Convert(v)
+	value, _, err := t.Convert(v)
 	if err != nil {
 		panic(err)
 	}

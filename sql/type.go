@@ -37,7 +37,7 @@ var (
 
 	// ErrConvertToSQL is returned when Convert failed.
 	// It makes an error less verbose comparing to what spf13/cast returns.
-	ErrConvertToSQL = errors.NewKind("incompatible conversion to SQL type: %s")
+	ErrConvertToSQL = errors.NewKind("incompatible conversion to SQL type: '%v'->%s")
 )
 
 const (
@@ -48,6 +48,10 @@ const (
 	// TimestampDatetimeLayout is the formatting string with the layout of the timestamp
 	// using the format of Go "time" package.
 	TimestampDatetimeLayout = "2006-01-02 15:04:05.999999"
+
+	// DatetimeLayoutNoTrim is the formatting string with the layout of the datetime that
+	// doesn't trim trailing zeros
+	DatetimeLayoutNoTrim = "2006-01-02 15:04:05.000000"
 )
 
 const (
@@ -57,19 +61,30 @@ const (
 	True = int8(1)
 )
 
+type ConvertInRange bool
+
+const (
+	InRange    ConvertInRange = true
+	OutOfRange                = false
+)
+
 // Type represents a SQL type.
 type Type interface {
 	CollationCoercible
 	// Compare returns an integer comparing two values.
 	// The result will be 0 if a==b, -1 if a < b, and +1 if a > b.
 	Compare(interface{}, interface{}) (int, error)
-	// Convert a value of a compatible type to a most accurate type.
-	Convert(interface{}) (interface{}, error)
+	// Convert a value of a compatible type to a most accurate type, returning
+	// the new value, whether the value in range, or an error. If |inRange| is
+	// false, the value was coerced according to MySQL's rules.
+	Convert(interface{}) (interface{}, ConvertInRange, error)
 	// Equals returns whether the given type is equivalent to the calling type. All parameters are included in the
 	// comparison, so ENUM("a", "b") is not equivalent to ENUM("a", "b", "c").
 	Equals(otherType Type) bool
-	// MaxTextResponseByteLength returns the maximum number of bytes needed to serialize an instance of this type as a string in a response over the wire for MySQL's text protocol – in other words, this is the maximum bytes needed to serialize any value of this type as human-readable text, NOT in a more compact, binary representation.
-	MaxTextResponseByteLength() uint32
+	// MaxTextResponseByteLength returns the maximum number of bytes needed to serialize an instance of this type
+	// as a string in a response over the wire for MySQL's text protocol – in other words, this is the maximum bytes
+	// needed to serialize any value of this type as human-readable text, NOT in a more compact, binary representation.
+	MaxTextResponseByteLength(ctx *Context) uint32
 	// Promote will promote the current type to the largest representing type of the same kind, such as Int8 to Int64.
 	Promote() Type
 	// SQL returns the sqltypes.Value for the given value.
@@ -106,6 +121,7 @@ type NumberType interface {
 	Type
 	IsSigned() bool
 	IsFloat() bool
+	DisplayWidth() int
 }
 
 // StringType represents all string types, including VARCHAR and BLOB.
@@ -134,6 +150,7 @@ type DatetimeType interface {
 	ConvertWithoutRangeCheck(v interface{}) (time.Time, error)
 	MaximumTime() time.Time
 	MinimumTime() time.Time
+	Precision() int
 }
 
 // YearType represents the YEAR type.
@@ -169,6 +186,9 @@ type EnumType interface {
 	Collation() CollationID
 	// IndexOf returns the index of the given string. If the string was not found, then this returns -1.
 	IndexOf(v string) int
+	// IsSubsetOf returns whether every element in this is also in |otherType|, with the same indexes.
+	// |otherType| may contain additional elements not in this.
+	IsSubsetOf(otherType EnumType) bool
 	// NumberOfElements returns the number of enumerations.
 	NumberOfElements() uint16
 	// Values returns the elements, in order, of every enumeration.
@@ -186,8 +206,9 @@ type DecimalType interface {
 	ConvertToNullDecimal(v interface{}) (decimal.NullDecimal, error)
 	//ConvertNoBoundsCheck normalizes an interface{} to a decimal type without performing expensive bound checks
 	ConvertNoBoundsCheck(v interface{}) (decimal.Decimal, error)
-	// BoundsCheck rounds and validates a decimal
-	BoundsCheck(v decimal.Decimal) (decimal.Decimal, error)
+	// BoundsCheck rounds and validates a decimal, returning the decimal,
+	// whether the value was out of range, and an error.
+	BoundsCheck(v decimal.Decimal) (decimal.Decimal, ConvertInRange, error)
 	// ExclusiveUpperBound returns the exclusive upper bound for this Decimal.
 	// For example, DECIMAL(5,2) would return 1000, as 999.99 is the max represented.
 	ExclusiveUpperBound() decimal.Decimal
@@ -233,4 +254,6 @@ type SystemVariableType interface {
 	// DecodeValue returns the original value given to EncodeValue from the given string. This is different from `Convert`,
 	// as the encoded value may technically be an "illegal" value according to the type rules.
 	DecodeValue(string) (interface{}, error)
+	// UnderlyingType returns the underlying type that this system variable type is based on.
+	UnderlyingType() Type
 }

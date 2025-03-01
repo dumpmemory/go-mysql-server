@@ -19,21 +19,58 @@ import (
 	"time"
 
 	"github.com/dolthub/vitess/go/sqltypes"
+	"github.com/dolthub/vitess/go/vt/sqlparser"
 	"gopkg.in/src-d/go-errors.v1"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/analyzer"
+	"github.com/dolthub/go-mysql-server/sql/analyzer/analyzererrors"
 	"github.com/dolthub/go-mysql-server/sql/expression"
-	"github.com/dolthub/go-mysql-server/sql/plan"
+	"github.com/dolthub/go-mysql-server/sql/planbuilder"
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 type QueryTest struct {
-	Query           string
-	Expected        []sql.Row
-	ExpectedColumns sql.Schema // only Name and Type matter here, because that's what we send on the wire
-	Bindings        map[string]sql.Expression
-	SkipPrepared    bool
+	// Query is the query string to execute
+	Query string
+	// Expected is the expected result of the query
+	Expected []sql.Row
+	// ExpectedColumns is the set of expected column names for the query results, if specified.
+	// Only the Name and Type matter of the columns are checked.
+	ExpectedColumns sql.Schema
+	// Bindings are the bind values for the query, if provided
+	Bindings map[string]sqlparser.Expr
+	// SkipPrepared indicates that the query should be skipped when testing prepared statements
+	SkipPrepared bool
+	// SkipServerEngine indicates that the query should be skipped when testing a server engine (as opposed to the
+	// simpler in-place engine object)
+	SkipServerEngine bool
+	// Dialect is the supported dialect for this query, which must match the dialect of the harness if specified.
+	// The query is skipped if the dialect doesn't match.
+	Dialect string
+}
+
+type QueryPlanTest struct {
+	Query             string
+	ExpectedPlan      string
+	ExpectedEstimates string
+	ExpectedAnalysis  string
+	Skip              bool
+}
+
+// QueryPlanTODOs are queries where the query planner produces a correct (results) but suboptimal plan.
+var QueryPlanTODOs = []QueryPlanTest{
+	{
+		// TODO: this should use an index. Extra join condition should get moved out of the join clause into a filter
+		Query: `SELECT pk,i,f FROM one_pk RIGHT JOIN niltable ON pk=i and pk > 0 ORDER BY 2,3`,
+		ExpectedPlan: "Sort(niltable.i ASC, niltable.f ASC)\n" +
+			" └─ Project(one_pk.pk, niltable.i, niltable.f)\n" +
+			"     └─ RightJoin((one_pk.pk = niltable.i) AND (one_pk.pk > 0))\n" +
+			"         ├─ Projected table access on [pk]\n" +
+			"         │   └─ Table(one_pk)\n" +
+			"         └─ Projected table access on [i f]\n" +
+			"             └─ Table(niltable)\n" +
+			"",
+	},
 }
 
 var SpatialQueryTests = []QueryTest{
@@ -742,6 +779,327 @@ var SpatialQueryTests = []QueryTest{
 
 var QueryTests = []QueryTest{
 	{
+		Query: "WITH cte AS (SELECT * FROM xy) SELECT *, (SELECT SUM(x) FROM cte) AS xy FROM cte",
+		Expected: []sql.Row{
+			{0, 2, float64(6)}, {1, 0, float64(6)}, {2, 1, float64(6)}, {3, 3, float64(6)},
+		},
+	},
+	{
+		Query: "select 0 as col1, 1 as col2, 2 as col2 group by col2 having col2 = 1",
+		Expected: []sql.Row{
+			{0, 1, 2},
+		},
+	},
+	{
+		Query: "select count(i) from mytable",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		// Assert that SYSDATE() returns different times on each call in a query (unlike NOW())
+		// Using the maximum precision for fractional seconds, lets us see a difference.
+		Query:    "select now() = sysdate(), sleep(0.1), now(6) < sysdate(6);",
+		Expected: []sql.Row{{true, 0, true}},
+	},
+	{
+		Query:    "select 1 as x from xy having AVG(x) > 0",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select 1 as x, AVG(x) from xy group by (y) having AVG(x) > 0",
+		Expected: []sql.Row{{1, float64(1)}, {1, float64(2)}, {1, float64(3)}},
+	},
+	{
+		Query:    "select y as x from xy group by (y) having AVG(x) > 0",
+		Expected: []sql.Row{{0}, {1}, {3}},
+	},
+	//{
+	//	Query:    "select y as z from xy group by (y) having AVG(z) > 0",
+	//	Expected: []sql.Row{{1}, {2}, {3}},
+	//},
+	{
+		Query:    "SELECT * FROM mytable t0 INNER JOIN mytable t1 ON (t1.i IN (((true)%(''))));",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "select x from xy where y in (select xy.x from xy join (select t2.y from xy t2 where exists (select t3.y from xy t3 where t3.y = xy.x)) t1) order by 1;",
+		Expected: []sql.Row{{0}, {1}, {2}, {3}},
+	},
+	{
+		Query:    "select x from xy where y in (select x from xy where x in (select y from xy)) order by 1;",
+		Expected: []sql.Row{{0}, {1}, {2}, {3}},
+	},
+	{
+		Query:    "SELECT 1 WHERE ((1 IN (NULL >= 1)) IS NULL);",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "SELECT 1 WHERE (1 IN (NULL NOT BETWEEN -1 AND 1)) IS NULL;",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "SELECT 1 WHERE ((1 IN (NULL * 1)) IS NULL);",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select coalesce(1, 0.0);",
+		Expected: []sql.Row{{"1"}},
+	},
+	{
+		Query:    "select coalesce(1, '0');",
+		Expected: []sql.Row{{"1"}},
+	},
+	{
+		Query:    "select coalesce(1, 'x');",
+		Expected: []sql.Row{{"1"}},
+	},
+	{
+		Query:    "select coalesce(1, 1);",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select coalesce(1, CAST('2017-08-29' AS DATE))",
+		Expected: []sql.Row{{"1"}},
+	},
+	{
+		Query:    "SELECT count(*) from mytable WHERE ((i IN (NULL >= 1)) IS NULL);",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT count(*) from mytable WHERE (i IN (NULL NOT BETWEEN -1 AND 1)) IS NULL;",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT count(*) from mytable WHERE ((i IN (NULL * 1)) IS NULL);",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT count(*) from mytable WHERE (i IN (-''));",
+		Expected: []sql.Row{{0}},
+	},
+	{
+		Query:    "SELECT 1 % true",
+		Expected: []sql.Row{{"0"}},
+	},
+	{
+		Query:    "SELECT * from mytable where (0.000 and true)",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT * from mytable where (-0.000 and true)",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT 1 WHERE power(88.0447354000000000000000333333333,100) % 1;",
+		Expected: []sql.Row{},
+	},
+	{
+		SkipServerEngine: true,
+		Query:            "show full processlist",
+		Expected:         []sql.Row{},
+	},
+	{
+		Query: "select * from (select i, i2 from niltable) a(x,y) union select * from (select 1, NULL) b(x,y) union select * from (select i, i2 from niltable) c(x,y)",
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "x",
+				Type: types.Int64,
+			},
+			{
+				Name: "y",
+				Type: types.Int64,
+			},
+		},
+		Expected: []sql.Row{
+			{1, nil},
+			{2, 2},
+			{3, nil},
+			{4, 4},
+			{5, nil},
+			{6, 6},
+		},
+	},
+	{
+		Query: "select * from (select 1, 1) a(x,y) union select * from (select 1, NULL) b(x,y) union select * from (select 1,1) c(x,y);",
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "x",
+				Type: types.Int8,
+			},
+			{
+				Name: "y",
+				Type: types.Int64,
+			},
+		},
+		Expected: []sql.Row{
+			{1, 1},
+			{1, nil},
+		},
+	},
+	{
+		Query: `SELECT I,S from mytable order by 1`,
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "I",
+				Type: types.Int64,
+			},
+			{
+				Name: "S",
+				Type: types.MustCreateStringWithDefaults(sqltypes.VarChar, 20),
+			},
+		},
+		Expected: []sql.Row{
+			{1, "first row"},
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		Query: `SELECT s as i, i as i from mytable order by 1`,
+		Expected: []sql.Row{
+			{"first row", 1},
+			{"second row", 2},
+			{"third row", 3},
+		},
+	},
+	{
+		Query:    "SELECT SUM(i), i FROM mytable GROUP BY i ORDER BY 1+SUM(i) ASC",
+		Expected: []sql.Row{{float64(1), 1}, {float64(2), 2}, {float64(3), 3}},
+	},
+	{
+		Query:    "SELECT SUM(i) as sum, i FROM mytable GROUP BY i ORDER BY 1+SUM(i) ASC",
+		Expected: []sql.Row{{float64(1), 1}, {float64(2), 2}, {float64(3), 3}},
+	},
+	{
+		Query:    "select count(1)",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select count(100)",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select sum(1)",
+		Expected: []sql.Row{{float64(1)}},
+	},
+	{
+		Query:    "select sum(100)",
+		Expected: []sql.Row{{float64(100)}},
+	},
+	{
+		Query:    "select count(*) from mytable",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    `select count(*) as cnt from mytable`,
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "select count(*) from keyless",
+		Expected: []sql.Row{{4}},
+	},
+	{
+		Query:    "select count(*) from xy",
+		Expected: []sql.Row{{4}},
+	},
+	{
+		Query:    "select count(*) from xy alias",
+		Expected: []sql.Row{{4}},
+	},
+	{
+		Query:    "select count(1) from mytable",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "select count(1) from xy",
+		Expected: []sql.Row{{4}},
+	},
+	{
+		Query:    "select count(1) from xy, uv",
+		Expected: []sql.Row{{16}},
+	},
+	{
+		Query:    "select count('abc') from xy, uv",
+		Expected: []sql.Row{{16}},
+	},
+	{
+		Query:    "select sum('abc') from mytable",
+		Expected: []sql.Row{{float64(0)}},
+	},
+	{
+		Query:    "select sum(10) from mytable",
+		Expected: []sql.Row{{float64(30)}},
+	},
+	{
+		Query:    "select sum(1) from emptytable",
+		Expected: []sql.Row{{nil}},
+	},
+	{
+		Query:    "select * from (select count(*) from xy) dt",
+		Expected: []sql.Row{{4}},
+	},
+	{
+		Query:    "select (select count(*) from xy), (select count(*) from uv)",
+		Expected: []sql.Row{{4, 4}},
+	},
+	{
+		Query:    "select (select count(*) from xy), (select count(*) from uv), count(*) from ab",
+		Expected: []sql.Row{{4, 4, 4}},
+	},
+	{
+		Query:    "select i from mytable alias where i = 1 and s = 'first row'",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query: `
+Select x
+from (select * from xy) sq1
+union all
+select u
+from (select * from uv) sq2
+limit 1
+offset 1;`,
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query: `
+Select * from (
+  With recursive cte(s) as (select 1 union select x from xy join cte on x = s)
+  Select * from cte
+  Union
+  Select x from xy where x in (select * from cte)
+ ) dt;`,
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query: `
+WITH RECURSIVE cte(d) AS (
+  SELECT 0
+  UNION ALL
+  SELECT cte.d + 1 FROM cte limit 3
+)
+SELECT * FROM cte WHERE  d = 2;`,
+		Expected: []sql.Row{{2}},
+	},
+	{
+		// https://github.com/dolthub/dolt/issues/5642
+		Query:    "SELECT count(*) FROM mytable WHERE i = 3720481604718463778705849469618542795;",
+		Expected: []sql.Row{{0}},
+	},
+	{
+		Query:    "SELECT count(*) FROM mytable WHERE i <> 3720481604718463778705849469618542795;",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT count(*) FROM mytable WHERE i < 3720481604718463778705849469618542795 AND i > 0;",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT count(*) FROM mytable WHERE i < 3720481604718463778705849469618542795 OR i > 0;",
+		Expected: []sql.Row{{3}},
+	},
+	{
 		// https://github.com/dolthub/dolt/issues/4874
 		Query:    "select * from information_schema.columns where column_key in ('invalid_enum_value') and table_name = 'does_not_exist';",
 		Expected: []sql.Row{},
@@ -765,6 +1123,22 @@ var QueryTests = []QueryTest{
 	{
 		Query:    "select count(*) from typestable where s1 in ('', 'bye');",
 		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select count(*) from mytable where s in ('', 'first row');",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select count(*) from mytable where s in (1, 'first row');",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select count(*) from mytable where s in (NULL, 'first row');",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "select count(*) from niltable where i2 in (NULL, 1);",
+		Expected: []sql.Row{{0}},
 	},
 	{
 		Query: "SELECT * FROM mytable;",
@@ -855,6 +1229,72 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		Query: "SELECT count(*), i, concat(i, i), 123, 'abc', concat('abc', 'def') FROM emptytable;",
+		Expected: []sql.Row{
+			{0, nil, nil, 123, "abc", "abcdef"},
+		},
+	},
+	{
+		Query: "SELECT count(*), i, concat(i, i), 123, 'abc', concat('abc', 'def') FROM mytable where false;",
+		Expected: []sql.Row{
+			{0, nil, nil, 123, "abc", "abcdef"},
+		},
+	},
+	{
+		Query: "SELECT pk, u, v FROM one_pk JOIN (SELECT count(*) AS u, 123 AS v FROM emptytable) uv WHERE pk = u;",
+		Expected: []sql.Row{
+			{0, 0, 123},
+		},
+	},
+	{
+		Query: "SELECT pk, u, v FROM one_pk JOIN (SELECT count(*) AS u, 123 AS v FROM mytable WHERE false) uv WHERE pk = u;",
+		Expected: []sql.Row{
+			{0, 0, 123},
+		},
+	},
+	{
+		Query: "SELECT pk FROM one_pk WHERE (pk, 123) IN (SELECT count(*) AS u, 123 AS v FROM emptytable);",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "SELECT pk FROM one_pk WHERE (pk, 123) IN (SELECT count(*) AS u, 123 AS v FROM mytable WHERE false);",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "SELECT pk FROM one_pk WHERE (pk, 123) NOT IN (SELECT count(*) AS u, 123 AS v FROM emptytable);",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "SELECT pk FROM one_pk WHERE (pk, 123) NOT IN (SELECT count(*) AS u, 123 AS v FROM mytable WHERE false);",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "SELECT i FROM mytable WHERE EXISTS (SELECT * FROM (SELECT count(*) as u, 123 as v FROM emptytable) uv);",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "SELECT count(*), (SELECT i FROM mytable WHERE i = 1 group by i);",
+		Expected: []sql.Row{
+			{1, 1},
+		},
+	},
+	{
 		Query: "SELECT pk DIV 2, SUM(c3) FROM one_pk GROUP BY 1 ORDER BY 1",
 		Expected: []sql.Row{
 			{int64(0), float64(14)},
@@ -871,15 +1311,15 @@ var QueryTests = []QueryTest{
 	{
 		Query: "SELECT pk DIV 2, SUM(c3) + sum(c3) as sum FROM one_pk GROUP BY 1 ORDER BY 1",
 		Expected: []sql.Row{
-			{int64(0), int64(28)},
-			{int64(1), int64(108)},
+			{int64(0), float64(28)},
+			{int64(1), float64(108)},
 		},
 	},
 	{
 		Query: "SELECT pk DIV 2, SUM(c3) + min(c3) as sum_and_min FROM one_pk GROUP BY 1 ORDER BY 1",
 		Expected: []sql.Row{
-			{int64(0), int64(16)},
-			{int64(1), int64(76)},
+			{int64(0), float64(16)},
+			{int64(1), float64(76)},
 		},
 		ExpectedColumns: sql.Schema{
 			{
@@ -888,15 +1328,15 @@ var QueryTests = []QueryTest{
 			},
 			{
 				Name: "sum_and_min",
-				Type: types.Int64,
+				Type: types.Float64,
 			},
 		},
 	},
 	{
 		Query: "SELECT pk DIV 2, SUM(`c3`) +    min( c3 ) FROM one_pk GROUP BY 1 ORDER BY 1",
 		Expected: []sql.Row{
-			{int64(0), int64(16)},
-			{int64(1), int64(76)},
+			{int64(0), float64(16)},
+			{int64(1), float64(76)},
 		},
 		ExpectedColumns: sql.Schema{
 			{
@@ -905,7 +1345,7 @@ var QueryTests = []QueryTest{
 			},
 			{
 				Name: "SUM(`c3`) +    min( c3 )",
-				Type: types.Int64,
+				Type: types.Float64,
 			},
 		},
 	},
@@ -1001,7 +1441,68 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{
 			{"first row", int64(1)},
 			{"second row", int64(2)},
+			{"third row", int64(3)},
+		},
+	},
+	{
+		Query: "SELECT s,i FROM mytable order by i DESC;",
+		Expected: []sql.Row{
+			{"third row", int64(3)},
+			{"second row", int64(2)},
+			{"first row", int64(1)},
+		},
+	},
+	{
+		Query: "SELECT s,i FROM mytable as a order by i;",
+		Expected: []sql.Row{
+			{"first row", int64(1)},
+			{"second row", int64(2)},
 			{"third row", int64(3)}},
+	},
+	{
+		Query: "SELECT pk1, pk2 FROM two_pk order by pk1 asc, pk2 asc;",
+		Expected: []sql.Row{
+			{0, 0},
+			{0, 1},
+			{1, 0},
+			{1, 1},
+		},
+	},
+	{
+		Query: "SELECT pk1, pk2 FROM two_pk order by pk1 asc, pk2 desc;",
+		Expected: []sql.Row{
+			{0, 1},
+			{0, 0},
+			{1, 1},
+			{1, 0},
+		},
+	},
+	{
+		Query: "SELECT pk1, pk2 FROM two_pk order by pk1 desc, pk2 desc;",
+		Expected: []sql.Row{
+			{1, 1},
+			{1, 0},
+			{0, 1},
+			{0, 0},
+		},
+	},
+	{
+		Query: "SELECT pk1, pk2 FROM two_pk group by pk1, pk2 order by pk1, pk2",
+		Expected: []sql.Row{
+			{0, 0},
+			{0, 1},
+			{1, 0},
+			{1, 1},
+		},
+	},
+	{
+		Query: "SELECT pk1, pk2 FROM two_pk group by pk1, pk2 order by pk1 desc, pk2 desc",
+		Expected: []sql.Row{
+			{1, 1},
+			{1, 0},
+			{0, 1},
+			{0, 0},
+		},
 	},
 	{
 		Query: "SELECT s,i FROM (select i,s FROM mytable) mt;",
@@ -1056,13 +1557,13 @@ var QueryTests = []QueryTest{
 	{
 		Query: `SELECT * FROM (values row(1+1,2+2), row(floor(1.5),concat("a","b"))) a order by 1`,
 		Expected: []sql.Row{
-			{1.0, "ab"},
-			{2.0, "4"},
+			{1, "ab"},
+			{2, "4"},
 		},
 		ExpectedColumns: sql.Schema{
 			{
 				Name: "column_0",
-				Type: types.Float64,
+				Type: types.Int64,
 			},
 			{
 				Name: "column_1",
@@ -1073,13 +1574,13 @@ var QueryTests = []QueryTest{
 	{
 		Query: `SELECT * FROM (values row(1+1,2+2), row(floor(1.5),concat("a","b"))) a (c,d) order by 1`,
 		Expected: []sql.Row{
-			{1.0, "ab"},
-			{2.0, "4"},
+			{1, "ab"},
+			{2, "4"},
 		},
 		ExpectedColumns: sql.Schema{
 			{
 				Name: "c",
-				Type: types.Float64,
+				Type: types.Int64,
 			},
 			{
 				Name: "d",
@@ -1090,8 +1591,8 @@ var QueryTests = []QueryTest{
 	{
 		Query: `SELECT column_0 FROM (values row(1+1,2+2), row(floor(1.5),concat("a","b"))) a order by 1`,
 		Expected: []sql.Row{
-			{1.0},
-			{2.0},
+			{1},
+			{2},
 		},
 	},
 	{
@@ -1125,9 +1626,8 @@ var QueryTests = []QueryTest{
 		Expected:     []sql.Row{{"1"}, {"1.5"}},
 	},
 	{
-		// the result on sql shell are '1' and '1.5' but instead it should have decimal values of '1.0' and '1.5'
 		Query:    `SELECT column_0 FROM (values row(1.5,2+2), row(floor(1.5),concat("a","b"))) a order by 1;`,
-		Expected: []sql.Row{{float64(1)}, {1.5}},
+		Expected: []sql.Row{{"1.0"}, {"1.5"}},
 	},
 	{
 		Query: `SELECT FORMAT(val, 2) FROM
@@ -1201,6 +1701,149 @@ var QueryTests = []QueryTest{
 			{-5040},
 		},
 	},
+	{
+		Query: "values row(1, 3), row(2, 2), row(3, 1);",
+		Expected: []sql.Row{
+			{1, 3},
+			{2, 2},
+			{3, 1},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1);",
+		Expected: []sql.Row{
+			{1, 3},
+			{2, 2},
+			{3, 1},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1) order by 1 asc;",
+		Expected: []sql.Row{
+			{1, 3},
+			{2, 2},
+			{3, 1},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1) order by 1 desc;",
+		Expected: []sql.Row{
+			{3, 1},
+			{2, 2},
+			{1, 3},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1) order by 2 asc;",
+		Expected: []sql.Row{
+			{3, 1},
+			{2, 2},
+			{1, 3},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1) order by 2 desc;",
+		Expected: []sql.Row{
+			{1, 3},
+			{2, 2},
+			{3, 1},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1) limit 2;",
+		Expected: []sql.Row{
+			{1, 3},
+			{2, 2},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+	{
+		Query: "values (1, 3), (2, 2), (3, 1) order by 2 limit 2;",
+		Expected: []sql.Row{
+			{3, 1},
+			{2, 2},
+		},
+		ExpectedColumns: sql.Schema{
+			{
+				Name: "column_0",
+				Type: types.Int8,
+			},
+			{
+				Name: "column_1",
+				Type: types.Int8,
+			},
+		},
+	},
+
 	{
 		Query:    "SELECT TIMEDIFF(null, '2017-11-30 22:59:59');",
 		Expected: []sql.Row{{nil}},
@@ -1279,6 +1922,99 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		Query: `SELECT JSON_KEYS(c3) FROM jsontable`,
+		Expected: []sql.Row{
+			{types.MustJSON(`["a"]`)},
+			{types.MustJSON(`["b"]`)},
+			{types.MustJSON(`["c"]`)},
+			{types.MustJSON(`["d"]`)},
+		},
+	},
+	{
+		Query: `SELECT JSON_OVERLAPS(c3, '{"a": 2, "d": 2}') FROM jsontable`,
+		Expected: []sql.Row{
+			{true},
+			{false},
+			{false},
+			{true},
+		},
+	},
+	{
+		Query: `SELECT JSON_MERGE(c3, '{"a": 1}') FROM jsontable`,
+		Expected: []sql.Row{
+			{types.MustJSON(`{"a": [2, 1]}`)},
+			{types.MustJSON(`{"a": 1, "b": 2}`)},
+			{types.MustJSON(`{"a": 1, "c": 2}`)},
+			{types.MustJSON(`{"a": 1, "d": 2}`)},
+		},
+	},
+	{
+		Query: `SELECT JSON_MERGE_PRESERVE(c3, '{"a": 1}') FROM jsontable`,
+		Expected: []sql.Row{
+			{types.MustJSON(`{"a": [2, 1]}`)},
+			{types.MustJSON(`{"a": 1, "b": 2}`)},
+			{types.MustJSON(`{"a": 1, "c": 2}`)},
+			{types.MustJSON(`{"a": 1, "d": 2}`)},
+		},
+	},
+	{
+		Query: `SELECT JSON_MERGE_PATCH(c3, '{"a": 1}') FROM jsontable`,
+		Expected: []sql.Row{
+			{types.MustJSON(`{"a": 1}`)},
+			{types.MustJSON(`{"a": 1, "b": 2}`)},
+			{types.MustJSON(`{"a": 1, "c": 2}`)},
+			{types.MustJSON(`{"a": 1, "d": 2}`)},
+		},
+	},
+	{
+		Query: `SELECT CONCAT(JSON_OBJECT('aa', JSON_OBJECT('bb', 123, 'y', 456), 'z', JSON_OBJECT('cc', 321, 'x', 654)), "")`,
+		Expected: []sql.Row{
+			{`{"z": {"x": 654, "cc": 321}, "aa": {"y": 456, "bb": 123}}`},
+		},
+	},
+	{
+		Query: `SELECT CONCAT(JSON_ARRAY(JSON_OBJECT('aa', 123, 'z', 456), JSON_OBJECT('BB', 321, 'Y', 654)), "")`,
+		Expected: []sql.Row{
+			{`[{"z": 456, "aa": 123}, {"Y": 654, "BB": 321}]`},
+		},
+	},
+	{
+		Query: `select json_pretty(c3) from jsontable`,
+		Expected: []sql.Row{
+			{
+				`{
+  "a": 2
+}`,
+			},
+			{
+				`{
+  "b": 2
+}`,
+			},
+			{
+				`{
+  "c": 2
+}`,
+			},
+			{
+				`{
+  "d": 2
+}`,
+			},
+		},
+	},
+	{
+		Query: `select json_pretty(json_object("id", 1, "name", "test"));`,
+		Expected: []sql.Row{
+			{
+				`{
+  "id": 1,
+  "name": "test"
+}`,
+			},
+		},
+	},
+	{
 		Query: `SELECT column_0, sum(column_1) FROM
 			(values row(1,1), row(1,3), row(2,2), row(2,5), row(3,9)) a
 			group by 1 order by 1`,
@@ -1340,8 +2076,8 @@ var QueryTests = []QueryTest{
 			join (values row(2,4), row(1.0,"ab")) b on a.column_0 = b.column_0 and a.column_0 = b.column_0
 			order by 1`,
 		Expected: []sql.Row{
-			{1.0, "ab"},
-			{2.0, "4"},
+			{1, "ab"},
+			{2, "4"},
 		},
 	},
 	{
@@ -1592,36 +2328,6 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query: `SELECT
-			"testing" AS s,
-			(SELECT max(i)
-			 FROM (SELECT * FROM mytable) mytable
-			 RIGHT JOIN
-				((SELECT i2, s2 FROM othertable ORDER BY i2 ASC)
-				 UNION ALL
-				 SELECT CAST(4 AS SIGNED) AS i2, "not found" AS s2 FROM DUAL) othertable
-				ON i2 = i) AS rj
-			FROM DUAL`,
-		Expected: []sql.Row{
-			{"testing", 3},
-		},
-	},
-	{
-		Query: `SELECT
-			"testing" AS s,
-			(SELECT max(i2)
-			 FROM (SELECT * FROM mytable) mytable
-			 RIGHT JOIN
-				((SELECT i2, s2 FROM othertable ORDER BY i2 ASC)
-				 UNION ALL
-				 SELECT CAST(4 AS SIGNED) AS i2, "not found" AS s2 FROM DUAL) othertable
-				ON i2 = i) AS rj
-			FROM DUAL`,
-		Expected: []sql.Row{
-			{"testing", 4},
-		},
-	},
-	{
 		Query: `WITH mt1 as (select i,s FROM mytable)
 			SELECT mtouter.i, (select s from mt1 where i = mtouter.i+1) FROM mt1 as mtouter where mtouter.i > 1 order by 1`,
 		Expected: []sql.Row{
@@ -1751,6 +2457,12 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{
 			{1},
 			{2},
+		},
+	},
+	{
+		Query: "with recursive a as (select 1) select * from a union select * from a;",
+		Expected: []sql.Row{
+			{1},
 		},
 	},
 	{
@@ -1887,12 +2599,6 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query: "with recursive t (n) as (select sum('1') from dual union all select (2.00) from dual) select sum(n) from t;",
-		Expected: []sql.Row{
-			{float64(3)},
-		},
-	},
-	{
 		Query: "with recursive t (n) as (select sum(1) from dual union all select (2.00) from dual) select sum(n) from t;",
 		Expected: []sql.Row{
 			{"3.00"},
@@ -1908,12 +2614,6 @@ var QueryTests = []QueryTest{
 		Query: "with recursive t (n) as (select sum(1) from dual union all select n+1 from t where n < 10) select sum(n) from t;",
 		Expected: []sql.Row{
 			{float64(55)},
-		},
-	},
-	{
-		Query: "with recursive t (n) as (select sum(1.0) from dual union all select n+1 from t where n < 10) select sum(n) from t;",
-		Expected: []sql.Row{
-			{"55.0"},
 		},
 	},
 	{
@@ -2136,6 +2836,10 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{int64(2)}, {int64(3)}, {int64(4)}},
 	},
 	{
+		Query:    `select (1 / 3) * (1 / 3);`,
+		Expected: []sql.Row{{"0.11111111"}},
+	},
+	{
 		Query:    "SELECT i div 2 FROM mytable order by 1;",
 		Expected: []sql.Row{{int64(0)}, {int64(1)}, {int64(1)}},
 	},
@@ -2320,6 +3024,34 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{false}},
 	},
 	{
+		Query:    "select 1 / 3 * 3 in (0.999999999);",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		Query:    "SELECT 99 NOT IN ( 98 + 97 / 99 );",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		Query:    "SELECT 1 NOT IN ( 97 / 99 );",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		Query:    `SELECT 1 NOT IN (1 / 9 * 5);`,
+		Expected: []sql.Row{{true}},
+	},
+	{
+		Query:    `SELECT 1 / 9 * 5 NOT IN (1);`,
+		Expected: []sql.Row{{true}},
+	},
+	{
+		Query:    `SELECT 1 / 9 * 5 IN (1 / 9 * 5);`,
+		Expected: []sql.Row{{true}},
+	},
+	{
+		Query:    "select 0 in (1/100000);",
+		Expected: []sql.Row{{false}},
+	},
+	{
 		Query:    `SELECT * FROM mytable WHERE i in (CAST(NULL AS SIGNED), 2, 3, 4)`,
 		Expected: []sql.Row{{3, "third row"}, {2, "second row"}},
 	},
@@ -2386,6 +3118,44 @@ var QueryTests = []QueryTest{
 	{
 		Query:    `SELECT * FROM (select a.i from mytable a cross join mytable b) sq WHERE sq.i in (1, 1)`,
 		Expected: []sql.Row{{1}, {1}, {1}},
+	},
+	{
+		Query: `SELECT * FROM mytable WHERE i in (1, 1, 1, 1, 1) and s = 'first row'`,
+		Expected: []sql.Row{
+			{1, "first row"},
+		},
+	},
+	{
+		Query: `SELECT * FROM mytable WHERE i in (1, 1, 1, 1, 1) or s in ('first row', 'first row', 'first row');`,
+		Expected: []sql.Row{
+			{1, "first row"},
+		},
+	},
+	{
+		Query: `SELECT * FROM mytable WHERE (i in (1, 1, 1, 1, 1) and s = 'first row') or s in ('first row', 'first row', 'first row');`,
+		Expected: []sql.Row{
+			{1, "first row"},
+		},
+	},
+	{
+		Query: `SELECT * FROM mytable WHERE i in (1, 1, 1, 1, 1) and s in ('first row', 'first row', 'first row');`,
+		Expected: []sql.Row{
+			{1, "first row"},
+		},
+	},
+	{
+		Query: `SELECT * FROM mytable WHERE i NOT in (1, 1, 1, 1, 1) and s != 'first row';`,
+		Expected: []sql.Row{
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		Query: `SELECT * FROM mytable WHERE i NOT in (1, 1, 1, 1, 1) and s NOT in ('first row', 'first row', 'first row');`,
+		Expected: []sql.Row{
+			{2, "second row"},
+			{3, "third row"},
+		},
 	},
 	{
 		Query:    "SELECT * from mytable WHERE 4 IN (i + 2)",
@@ -2706,6 +3476,38 @@ var QueryTests = []QueryTest{
 		Expected: nil,
 	},
 	{
+		Query:    "SELECT i FROM mytable WHERE i = 1 and i = 2",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE I = 1 and i = 2",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE i = 1 and i = '1'",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE i = 1 and i = '2'",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE i = 1 and s = 'first row' and i = 2",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE s = 'first row' and s = 'second row'",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE i = 1 and i between 2 and 2",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM mytable WHERE i between 1 and 1 and i between 2 and 2",
+		Expected: []sql.Row{},
+	},
+	{
 		Query:    "SELECT i FROM mytable WHERE s = 'first row' ORDER BY i DESC LIMIT 1;",
 		Expected: []sql.Row{{int64(1)}},
 	},
@@ -2718,7 +3520,55 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{int64(2)}},
 	},
 	{
+		Query:    "SELECT i FROM (SELECT i FROM mytable LIMIT 1) sq WHERE i = 3;",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM (SELECT i FROM mytable LIMIT 1) sq1) sq2 WHERE i = 3;",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM mytable ORDER BY i DESC LIMIT 1) sq WHERE i = 3;",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM (SELECT i FROM mytable ORDER BY i DESC  LIMIT 1) sq1) sq2 WHERE i = 3;",
+		Expected: []sql.Row{{3}},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM mytable WHERE i > 1) sq LIMIT 1;",
+		Expected: []sql.Row{{2}},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM (SELECT i FROM mytable WHERE i > 1) sq1) sq2 LIMIT 1;",
+		Expected: []sql.Row{{2}},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM (SELECT i FROM mytable) sq1 WHERE i > 1) sq2 LIMIT 1;",
+		Expected: []sql.Row{{2}},
+	},
+	{
+		Query:    "SELECT i FROM (SELECT i FROM (SELECT i FROM mytable LIMIT 1) sq1 WHERE i > 1) sq2 LIMIT 10;",
+		Expected: []sql.Row{},
+	},
+	{
 		Query:    "SELECT i FROM mytable WHERE i NOT IN (SELECT i FROM (SELECT * FROM (SELECT i as i, s as s FROM mytable) f) s)",
+		Expected: []sql.Row{},
+	},
+	{
+		Query: "SELECT * FROM (SELECT a.pk, b.i FROM one_pk a JOIN mytable b ORDER BY a.pk ASC, b.i ASC LIMIT 1) sq WHERE i != 0",
+		Expected: []sql.Row{
+			{0, 1},
+		},
+	},
+	{
+		Query: "SELECT * FROM (SELECT a.pk, b.i FROM one_pk a JOIN mytable b ORDER BY a.pk DESC, b.i DESC LIMIT 1) sq WHERE i != 0",
+		Expected: []sql.Row{
+			{3, 3},
+		},
+	},
+	{
+		Query:    "SELECT * FROM (SELECT pk FROM one_pk WHERE pk < 2 LIMIT 1) a JOIN (SELECT i FROM mytable WHERE i > 1 LIMIT 1) b WHERE pk >= 2;",
 		Expected: []sql.Row{},
 	},
 	{
@@ -2910,6 +3760,13 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{1}},
 	},
 	{
+		// The timestamp function actually converts to a datetime type, so check that we can convert values
+		// outside of the timestamp range, but inside the datetime range.
+		// https://github.com/dolthub/dolt/issues/8236
+		Query:    "SELECT timestamp('1001-01-01 00:00:00');",
+		Expected: []sql.Row{{time.Date(1001, time.January, 1, 0, 0, 0, 0, time.UTC)}},
+	},
+	{
 		Query:    "select i from datetime_table where timestamp_col = '2020-01-02T12:00:01'",
 		Expected: []sql.Row{},
 	},
@@ -2940,14 +3797,6 @@ var QueryTests = []QueryTest{
 	{
 		Query:    "SELECT dt1.i FROM datetime_table dt1 join datetime_table dt2 on dt1.date_col = date(date_sub(dt2.timestamp_col, interval 2 day)) order by 1",
 		Expected: []sql.Row{{1}, {2}},
-	},
-	{
-		Query: "SELECT unix_timestamp(timestamp_col) div 60 * 60 as timestamp_col, avg(i) from datetime_table group by 1 order by unix_timestamp(timestamp_col) div 60 * 60",
-		Expected: []sql.Row{
-			{"1577966400", 1.0},
-			{"1578225600", 2.0},
-			{"1578398400", 3.0}},
-		SkipPrepared: true,
 	},
 	{
 		Query:    "SELECT COUNT(*) FROM mytable;",
@@ -2988,24 +3837,38 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query:    `SELECT SUBSTRING_INDEX(mytable.s, "d", 1) AS s FROM mytable INNER JOIN othertable ON (SUBSTRING_INDEX(mytable.s, "d", 1) = SUBSTRING_INDEX(othertable.s2, "d", 1)) GROUP BY 1 HAVING s = 'secon'`,
+		Query:    `SELECT SUBSTRING_INDEX(mytable.s, "d", 1) AS s FROM mytable INNER JOIN othertable ON (SUBSTRING_INDEX(mytable.s, "d", 1) = SUBSTRING_INDEX(othertable.s2, "d", 1)) GROUP BY 1 HAVING s = 'secon';`,
 		Expected: []sql.Row{{"secon"}},
 	},
 	{
+		Query:    `SELECT SUBSTRING_INDEX(mytable.s, "d", 1) AS s FROM mytable INNER JOIN othertable ON (SUBSTRING_INDEX(mytable.s, "d", 1) = SUBSTRING_INDEX(othertable.s2, "d", 1)) GROUP BY s HAVING s = 'secon';`,
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    `SELECT SUBSTRING_INDEX(mytable.s, "d", 1) AS ss FROM mytable INNER JOIN othertable ON (SUBSTRING_INDEX(mytable.s, "d", 1) = SUBSTRING_INDEX(othertable.s2, "d", 1)) GROUP BY s HAVING s = 'secon';`,
+		Expected: []sql.Row{},
+	},
+	{
+		Query: `SELECT SUBSTRING_INDEX(mytable.s, "d", 1) AS ss FROM mytable INNER JOIN othertable ON (SUBSTRING_INDEX(mytable.s, "d", 1) = SUBSTRING_INDEX(othertable.s2, "d", 1)) GROUP BY ss HAVING ss = 'secon';`,
+		Expected: []sql.Row{
+			{"secon"},
+		},
+	},
+	{
 		Query:    `SELECT TRIM(mytable.s) AS s FROM mytable`,
-		Expected: []sql.Row{sql.Row{"first row"}, sql.Row{"second row"}, sql.Row{"third row"}},
+		Expected: []sql.Row{{"first row"}, {"second row"}, {"third row"}},
 	},
 	{
 		Query:    `SELECT TRIM("row" from mytable.s) AS s FROM mytable`,
-		Expected: []sql.Row{sql.Row{"first "}, sql.Row{"second "}, sql.Row{"third "}},
+		Expected: []sql.Row{{"first "}, {"second "}, {"third "}},
 	},
 	{
 		Query:    `SELECT TRIM(mytable.s from "first row") AS s FROM mytable`,
-		Expected: []sql.Row{sql.Row{""}, sql.Row{"first row"}, sql.Row{"first row"}},
+		Expected: []sql.Row{{""}, {"first row"}, {"first row"}},
 	},
 	{
 		Query:    `SELECT TRIM(mytable.s from mytable.s) AS s FROM mytable`,
-		Expected: []sql.Row{sql.Row{""}, sql.Row{""}, sql.Row{""}},
+		Expected: []sql.Row{{""}, {""}, {""}},
 	},
 	{
 		Query:    `SELECT TRIM("   foo   ")`,
@@ -3569,6 +4432,22 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{"0.0720000000"}},
 	},
 	{
+		Query:    "select 2000.0 / 250000000.0 * (24.0 * 6.0 * 6.25 * 10.0);",
+		Expected: []sql.Row{{"0.0720000000"}},
+	},
+	{
+		Query:    `select 100 / 35600.00 * 35600.00;`,
+		Expected: []sql.Row{{"99.999973"}},
+	},
+	{
+		Query:    `select 64 / 77 * 77;`,
+		Expected: []sql.Row{{"64.0000"}},
+	},
+	{
+		Query:    `select (1 / 3) * (1 / 3);`,
+		Expected: []sql.Row{{"0.11111111"}},
+	},
+	{
 		Query:    "select 1/2/3/4/5/6;",
 		Expected: []sql.Row{{"0.00138888888888888888"}},
 	},
@@ -3580,6 +4459,177 @@ var QueryTests = []QueryTest{
 		Query:    "select 1/2/3%4/5/6;",
 		Expected: []sql.Row{{"0.0055555555555556"}},
 	},
+
+	// check that internal precision is preserved in comparisons
+	{
+		// 0 scale + 0 scale = 9 scale
+		Query:    "select 1 / 3 = 0.333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 0 scale + 1 scale = 9 scale
+		Query:    "select 1 / 3.0 = 0.333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 0 scale + 6 scale = 18 scale
+		Query:    "select 1 / 3.000000 = 0.333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 0 scale + 15 scale = 27 scale
+		Query:    "select 1 / 3.000000000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 0 scale + 24 scale = 36 scale
+		Query:    "select 1 / 3.000000000000000000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	{
+		// 1 scale + 0 scale = 9 scale
+		Query:    "select 1.0 / 3 = 0.333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 1 scale + 1 scale = 18 scale
+		Query:    "select 1.0 / 3.0 = 0.333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 1 scale + 10 scale = 27 scale
+		Query:    "select 1.0 / 3.0000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 1 scale + 19 scale = 36 scale
+		Query:    "select 1.0 / 3.0000000000000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	{
+		// 6 scale + 8 scale = 18 scale
+		Query:    "select 1.000000 / 3.00000000 = 0.333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 6 scale + 9 scale = 27 scale
+		Query:    "select 1.000000 / 3.000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 6 scale + 17 scale = 27 scale
+		Query:    "select 1.000000 / 3.00000000000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 6 scale + 18 scale = 36 scale
+		Query:    "select 1.000000 / 3.000000000000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	{
+		// 7 scale + 7 scale = 18 scale
+		Query:    "select 1.0000000 / 3.0000000 = 0.333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 7 scale + 8 scale = 27 scale
+		Query:    "select 1.0000000 / 3.00000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 7 scale + 16 scale = 27 scale
+		Query:    "select 1.0000000 / 3.0000000000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 7 scale + 15 scale = 36 scale
+		Query:    "select 1.0000000 / 3.00000000000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	{
+		// 8 scale + 6 scale = 18 scale
+		Query:    "select 1.00000000 / 3.000000 = 0.333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 8 scale + 7 scale = 27 scale
+		Query:    "select 1.00000000 / 3.0000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 8 scale + 15 scale = 27 scale
+		Query:    "select 1.00000000 / 3.000000000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 8 scale + 14 scale = 36 scale
+		Query:    "select 1.00000000 / 3.0000000000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	{
+		// 9 scale + 5 scale = 18 scale
+		Query:    "select 1.000000000 / 3.00000 = 0.333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 9 scale + 6 scale = 27 scale
+		Query:    "select 1.000000000 / 3.000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 9 scale + 14 scale = 27 scale
+		Query:    "select 1.000000000 / 3.00000000000000 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 9 scale + 13 scale = 36 scale
+		Query:    "select 1.000000000 / 3.000000000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	{
+		// 10 scale + 1 scale = 27 scale
+		Query:    "select 1.0000000000 / 3.0 = 0.333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+	{
+		// 10 scale + 10 scale = 36 scale
+		Query:    "select 1.0000000000 / 3.0000000000 = 0.333333333333333333333333333333333333;",
+		Expected: []sql.Row{{true}},
+	},
+
+	// check that decimal internal precision is preserved in casts
+	{
+		// 0 scale + 0 scale = 9 scale
+		Query:    "select cast(1 / 3 as decimal(65,30));",
+		Expected: []sql.Row{{"0.333333333000000000000000000000"}},
+	},
+	{
+		// 0 scale + 1 scale = 9 scale
+		Query:    "select cast(1 / 3.0 as decimal(65,30));",
+		Expected: []sql.Row{{"0.333333333000000000000000000000"}},
+	},
+	{
+		// 0 scale + 6 scale = 18 scale
+		Query:    "select cast(1 / 3.000000 as decimal(65,30));",
+		Expected: []sql.Row{{"0.333333333333333333000000000000"}},
+	},
+	{
+		// 0 scale + 15 scale = 27 scale
+		Query:    "select cast(1 / 3.000000000000000 as decimal(65,30));",
+		Expected: []sql.Row{{"0.333333333333333333333333333000"}},
+	},
+	{
+		// 0 scale + 24 scale = 36 scale
+		Query:    "select cast(1 / 3.000000000000000000000000 as decimal(65,30));",
+		Expected: []sql.Row{{"0.333333333333333333333333333333"}},
+	},
+
 	{
 		Query:    "select 0.05 % 0.024;",
 		Expected: []sql.Row{{"0.002"}},
@@ -3621,6 +4671,10 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{uint64(65), uint64(65)}},
 	},
 	{
+		Query:    "SELECT 0x12345;",
+		Expected: []sql.Row{{[]uint8{0x1, 0x23, 0x45}}},
+	},
+	{
 		Query:    "SELECT i FROM mytable WHERE i BETWEEN 1 AND 2",
 		Expected: []sql.Row{{int64(1)}, {int64(2)}},
 	},
@@ -3635,6 +4689,20 @@ var QueryTests = []QueryTest{
 	{
 		Query:    "SELECT NOT 2 BETWEEN NULL AND 2",
 		Expected: []sql.Row{{nil}},
+	},
+	{
+		Query: "SELECT DISTINCT CAST(i AS DECIMAL) from mytable;",
+		Expected: []sql.Row{
+			{"1"},
+			{"2"},
+			{"3"},
+		},
+	},
+	{
+		Query: "SELECT SUM( DISTINCT CAST(i AS DECIMAL)) from mytable;",
+		Expected: []sql.Row{
+			{"6"},
+		},
 	},
 	{
 		Query: "SELECT DISTINCT * FROM (values row(7,31,27), row(79,17,38), row(78,59,26)) a (col0, col1, col2) WHERE ( + col1 + + col2 ) NOT BETWEEN NULL AND col1",
@@ -3684,6 +4752,14 @@ var QueryTests = []QueryTest{
 		Expected: nil,
 	},
 	{
+		Query:    "SELECT id FROM typestable WHERE da < adddate('2020-01-01', INTERVAL 1 DAY)",
+		Expected: []sql.Row{{int64(1)}},
+	},
+	{
+		Query:    "SELECT id FROM typestable WHERE da < adddate('2020-01-01', 1)",
+		Expected: []sql.Row{{int64(1)}},
+	},
+	{
 		Query:    "SELECT id FROM typestable WHERE ti > date_sub('2020-01-01', INTERVAL 1 DAY)",
 		Expected: []sql.Row{{int64(1)}},
 	},
@@ -3702,6 +4778,38 @@ var QueryTests = []QueryTest{
 	{
 		Query:    "SELECT id FROM typestable WHERE da < date_sub('2020-01-01', INTERVAL 1 DAY)",
 		Expected: nil,
+	},
+	{
+		Query:    "SELECT id FROM typestable WHERE da >= subdate('2020-01-01', INTERVAL 1 DAY)",
+		Expected: []sql.Row{{int64(1)}},
+	},
+	{
+		Query:    "SELECT id FROM typestable WHERE da >= subdate('2020-01-01', 1)",
+		Expected: []sql.Row{{int64(1)}},
+	},
+	{
+		Query:    "SELECT adddate(da, i32) from typestable;",
+		Expected: []sql.Row{{time.Date(2020, time.January, 4, 0, 0, 0, 0, time.UTC)}},
+	},
+	{
+		Query:    "SELECT adddate(da, concat(u32)) from typestable;",
+		Expected: []sql.Row{{time.Date(2020, time.January, 8, 0, 0, 0, 0, time.UTC)}},
+	},
+	{
+		Query:    "SELECT adddate(da, f32/10) from typestable;",
+		Expected: []sql.Row{{time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)}},
+	},
+	{
+		Query:    "SELECT subdate(da, i32) from typestable;",
+		Expected: []sql.Row{{time.Date(2019, time.December, 27, 0, 0, 0, 0, time.UTC)}},
+	},
+	{
+		Query:    "SELECT subdate(da, concat(u32)) from typestable;",
+		Expected: []sql.Row{{time.Date(2019, time.December, 23, 0, 0, 0, 0, time.UTC)}},
+	},
+	{
+		Query:    "SELECT subdate(da, f32/10) from typestable;",
+		Expected: []sql.Row{{time.Date(2019, time.December, 30, 0, 0, 0, 0, time.UTC)}},
 	},
 	{
 		Query: `SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM othertable) othertable_one) othertable_two) othertable_three WHERE s2 = 'first'`,
@@ -4076,11 +5184,57 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		Query:    "SELECT CAST(-3 AS DOUBLE) FROM dual",
+		Expected: []sql.Row{{-3.0}},
+	},
+	{
+		Query:    `SELECT CONVERT("-3.9876", FLOAT) FROM dual`,
+		Expected: []sql.Row{{float32(-3.9876)}},
+	},
+	{
+		Query:    "SELECT CAST(10.56789 as CHAR(3));",
+		Expected: []sql.Row{{"10."}},
+	},
+	{
+		Query:    "SELECT CAST(10.56789 as CHAR(30));",
+		Expected: []sql.Row{{"10.56789"}},
+	},
+	{
+		Query:    "SELECT CAST('abcdef' as BINARY(10));",
+		Expected: []sql.Row{{[]byte("abcdef\x00\x00\x00\x00")}},
+	},
+	{
+		Query:    `SELECT CONVERT(10.12345, DECIMAL(4,2))`,
+		Expected: []sql.Row{{"10.12"}},
+	},
+	{
+		Query:    `SELECT CONVERT(1234567893.1234567893, DECIMAL(20,10))`,
+		Expected: []sql.Row{{"1234567893.1234567893"}},
+	},
+	{
+		Query:    `SELECT CONVERT(10, DECIMAL(4,2))`,
+		Expected: []sql.Row{{"10.00"}},
+	},
+	{
 		Query: "SELECT CONVERT(-3, UNSIGNED) FROM mytable",
 		Expected: []sql.Row{
 			{uint64(18446744073709551613)},
 			{uint64(18446744073709551613)},
 			{uint64(18446744073709551613)},
+		},
+	},
+	{
+		Query:    "select 0 in (1 / 1000), 0 in (1 / 1000, 0), 0.001 in (1 / 1000, 0), 0.0001 in (1 / 1000, 0);",
+		Expected: []sql.Row{{false, true, true, false}},
+	},
+	{
+		Query:    "select 0 in (0.01 * 0.30), 1 in (1.0 * 1)",
+		Expected: []sql.Row{{false, true}},
+	},
+	{
+		Query: "SELECT MAX(CAST(NULL AS DECIMAL)) * 82",
+		Expected: []sql.Row{
+			{nil},
 		},
 	},
 	{
@@ -4219,6 +5373,16 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		Query:    "SELECT COALESCE (NULL, NULL)",
+		Expected: []sql.Row{{nil}},
+		ExpectedColumns: []*sql.Column{
+			{
+				Name: "COALESCE (NULL, NULL)",
+				Type: types.Null,
+			},
+		},
+	},
+	{
 		Query: "SELECT concat(s, i) FROM mytable",
 		Expected: []sql.Row{
 			{string("first row1")},
@@ -4229,7 +5393,7 @@ var QueryTests = []QueryTest{
 	{
 		Query: "SELECT version()",
 		Expected: []sql.Row{
-			{string("8.0.11")},
+			{"8.0.23"},
 		},
 	},
 	{
@@ -4389,9 +5553,9 @@ var QueryTests = []QueryTest{
 	{
 		Query: "SELECT SUM(i) + 1, i FROM mytable GROUP BY i ORDER BY i",
 		Expected: []sql.Row{
-			{int64(2), int64(1)},
-			{int64(3), int64(2)},
-			{int64(4), int64(3)},
+			{float64(2), int64(1)},
+			{float64(3), int64(2)},
+			{float64(4), int64(3)},
 		},
 	},
 	{
@@ -4466,8 +5630,9 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query:    "",
-		Expected: []sql.Row{},
+		SkipPrepared: true,
+		Query:        "",
+		Expected:     []sql.Row{},
 	},
 	{
 		Query: "/*!40101 SET NAMES " +
@@ -4533,7 +5698,7 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query: `SELECT * FROM foo.other_table`,
+		Query: `SELECT * FROM foo.othertable`,
 		Expected: []sql.Row{
 			{"a", int32(4)},
 			{"b", int32(2)},
@@ -4595,7 +5760,17 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		Query: `SHOW VARIABLES`,
+	},
+	{
 		Query: `SHOW VARIABLES LIKE 'gtid_mode'`,
+		Expected: []sql.Row{
+			{"gtid_mode", "OFF"},
+		},
+	},
+	{
+		// SHOW VARIABLES is case-insensitive
+		Query: `SHOW VARIABLES LIKE 'gtID_mO%'`,
 		Expected: []sql.Row{
 			{"gtid_mode", "OFF"},
 		},
@@ -4614,25 +5789,47 @@ var QueryTests = []QueryTest{
 	{
 		Query: `SHOW VARIABLES WHERE Variable_name = 'version' || variable_name = 'autocommit'`,
 		Expected: []sql.Row{
-			{"autocommit", 1}, {"version", ""},
+			{"autocommit", 1}, {"version", "8.0.23"},
 		},
 	},
 	{
 		Query: `SHOW VARIABLES WHERE Variable_name > 'version' and variable_name like '%_%'`,
 		Expected: []sql.Row{
-			{"version_comment", ""}, {"version_compile_machine", ""}, {"version_compile_os", ""}, {"version_compile_zlib", ""}, {"wait_timeout", 28800}, {"windowing_use_high_precision", 1},
+			{"version_comment", "Dolt"}, {"version_compile_machine", ""}, {"version_compile_os", ""}, {"version_compile_zlib", ""}, {"wait_timeout", 28800}, {"windowing_use_high_precision", 1},
 		},
+	},
+	{
+		Query: `SHOW VARIABLES WHERE "1" and variable_name = 'autocommit'`,
+		Expected: []sql.Row{
+			{"autocommit", 1},
+		},
+	},
+	{
+		Query:    `SHOW VARIABLES WHERE "0" and variable_name = 'autocommit'`,
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    `SHOW VARIABLES WHERE "abc" and variable_name = 'autocommit'`,
+		Expected: []sql.Row{},
 	},
 	{
 		Query: `SHOW GLOBAL VARIABLES LIKE '%mode'`,
 		Expected: []sql.Row{
 			{"block_encryption_mode", "aes-128-ecb"},
 			{"gtid_mode", "OFF"},
+			{"innodb_autoinc_lock_mode", int64(2)},
 			{"offline_mode", int64(0)},
 			{"pseudo_slave_mode", int64(0)},
 			{"rbr_exec_mode", "STRICT"},
-			{"sql_mode", "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY"},
+			{"sql_mode", "NO_ENGINE_SUBSTITUTION,ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"},
 			{"ssl_fips_mode", "OFF"},
+		},
+	},
+	// show variables like ... is case-insensitive
+	{
+		Query: "SHOW VARIABLES LIKE 'VERSION'",
+		Expected: []sql.Row{
+			{"version", "8.0.23"},
 		},
 	},
 	{
@@ -4658,6 +5855,23 @@ var QueryTests = []QueryTest{
 	{
 		Query:    `SELECT JSON_UNQUOTE(JSON_EXTRACT('{"xid":"hello"}', '$.xid')) = "hello"`,
 		Expected: []sql.Row{{true}},
+	},
+
+	{
+		Query:    `SELECT JSON_QUOTE('"foo"')`,
+		Expected: []sql.Row{{`"\"foo\""`}},
+	},
+	{
+		Query:    `SELECT JSON_QUOTE('[1, 2, 3]')`,
+		Expected: []sql.Row{{`"[1, 2, 3]"`}},
+	},
+	{
+		Query:    `SELECT JSON_QUOTE('"\t\u0032"')`,
+		Expected: []sql.Row{{`"\"\tu0032\""`}},
+	},
+	{
+		Query:    `SELECT JSON_QUOTE('"\t\\u0032"')`,
+		Expected: []sql.Row{{`"\"\t\\u0032\""`}},
 	},
 	{
 		Query:    `SELECT JSON_EXTRACT('{"xid":"hello"}', '$.xid') = "hello"`,
@@ -4735,8 +5949,8 @@ var QueryTests = []QueryTest{
 	{
 		Query: `describe myview`,
 		Expected: []sql.Row{
-			{"i", "bigint", "NO", "", "NULL", ""},
-			{"s", "varchar(20)", "NO", "", "NULL", ""},
+			{"i", "bigint", "NO", "", nil, ""},
+			{"s", "varchar(20)", "NO", "", nil, ""},
 		},
 	},
 	{
@@ -4820,15 +6034,66 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query: `SELECT if(123 = 123, NULL, "b")`,
-		Expected: []sql.Row{
-			{nil},
+		Query:    `SELECT if(123 = 123, NULL, "b")`,
+		Expected: []sql.Row{{nil}},
+		ExpectedColumns: []*sql.Column{
+			{Name: "if(123 = 123, NULL, \"b\")", Type: types.LongText},
+		},
+	},
+	{
+		Query:    `SELECT if(123 = 123, NULL, NULL = 1)`,
+		Expected: []sql.Row{{nil}},
+		ExpectedColumns: []*sql.Column{
+			{Name: "if(123 = 123, NULL, NULL = 1)", Type: types.Int64}, // TODO: this should be getting coerced to bool
+		},
+	},
+	{
+		Query:    `SELECT if(123 = 123, NULL, NULL)`,
+		Expected: []sql.Row{{nil}},
+		ExpectedColumns: []*sql.Column{
+			{Name: "if(123 = 123, NULL, NULL)", Type: types.Null},
 		},
 	},
 	{
 		Query: `SELECT if(123 > 123, "a", "b")`,
 		Expected: []sql.Row{
 			{"b"},
+		},
+	},
+	{
+		Query: `SELECT if(1, 123, 456)`,
+		Expected: []sql.Row{
+			{123},
+		},
+	},
+	{
+		Query: `SELECT if(0, 123, 456)`,
+		Expected: []sql.Row{
+			{456},
+		},
+	},
+	{
+		Query: `SELECT if(0, "abc", 456)`,
+		Expected: []sql.Row{
+			{456},
+		},
+	},
+	{
+		Query: `SELECT if(1, "abc", 456)`,
+		Expected: []sql.Row{
+			{"abc"},
+		},
+	},
+	{
+		Query: `SELECT 1 as foo, if((select foo), "a", "b")`,
+		Expected: []sql.Row{
+			{1, "a"},
+		},
+	},
+	{
+		Query: `SELECT 0 as foo, if((select foo), "a", "b")`,
+		Expected: []sql.Row{
+			{0, "b"},
 		},
 	},
 	{
@@ -5012,6 +6277,7 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		// NOTE: utf8_general_ci is collation of utf8mb3, which was deprecated and now removed in MySQL
 		Query: "SHOW COLLATION WHERE `Collation` IN ('binary', 'utf8_general_ci', 'utf8mb4_0900_ai_ci')",
 		Expected: []sql.Row{
 			{
@@ -5145,7 +6411,7 @@ var QueryTests = []QueryTest{
 	},
 	{
 		Query:    "SELECT DATE_ADD('2018-05-02', INTERVAL 1 day)",
-		Expected: []sql.Row{{time.Date(2018, time.May, 3, 0, 0, 0, 0, time.UTC)}},
+		Expected: []sql.Row{{"2018-05-03"}},
 	},
 	{
 		Query:    "SELECT DATE_ADD(DATE('2018-05-02'), INTERVAL 1 day)",
@@ -5157,7 +6423,7 @@ var QueryTests = []QueryTest{
 	},
 	{
 		Query:    "SELECT DATE_SUB('2018-05-02', INTERVAL 1 DAY)",
-		Expected: []sql.Row{{time.Date(2018, time.May, 1, 0, 0, 0, 0, time.UTC)}},
+		Expected: []sql.Row{{"2018-05-01"}},
 	},
 	{
 		Query:    "SELECT DATE_SUB(DATE('2018-05-02'), INTERVAL 1 DAY)",
@@ -5323,8 +6589,8 @@ var QueryTests = []QueryTest{
 	//	Expected: []sql.Row{{int32(3)}},
 	//},
 	{
-		Query:    `SELECT GREATEST(1, 2, 3, 4)`,
-		Expected: []sql.Row{{int64(4)}},
+		Query:    `SELECT GREATEST(@@back_log,@@auto_increment_offset)`,
+		Expected: []sql.Row{{1}},
 	},
 	{
 		Query:    `SELECT GREATEST(1, 2, "3", 4)`,
@@ -5341,6 +6607,10 @@ var QueryTests = []QueryTest{
 	{
 		Query:    `SELECT GREATEST(i, s) FROM mytable`,
 		Expected: []sql.Row{{float64(1)}, {float64(2)}, {float64(3)}},
+	},
+	{
+		Query:    `SELECT GREATEST(1, 2, 3, 4)`,
+		Expected: []sql.Row{{int64(4)}},
 	},
 	{
 		Query:    "select abs(-i) from mytable order by 1",
@@ -5388,6 +6658,10 @@ var QueryTests = []QueryTest{
 	},
 	{
 		Query:    "select length(s) from mytable order by i",
+		Expected: []sql.Row{{9}, {10}, {9}},
+	},
+	{
+		Query:    "select octet_length(s) from mytable order by i",
 		Expected: []sql.Row{{9}, {10}, {9}},
 	},
 	{
@@ -5507,6 +6781,10 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{time.Date(1920, 2, 3, 7, 41, 11, 0, time.UTC)}},
 	},
 	{
+		Query:    `SELECT LEAST(@@back_log,@@auto_increment_offset)`,
+		Expected: []sql.Row{{-1}},
+	},
+	{
 		Query:    `SELECT CHAR_LENGTH('áé'), LENGTH('àè')`,
 		Expected: []sql.Row{{int32(2), int32(4)}},
 	},
@@ -5543,6 +6821,7 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{1}},
 	},
 	{
+		// TODO: Neither MySQL or MariaDB have a function called DATETIME; remove this function.
 		Query:    `SELECT DATETIME(NOW()) - NOW()`,
 		Expected: []sql.Row{{int64(0)}},
 	},
@@ -5657,86 +6936,6 @@ var QueryTests = []QueryTest{
 		HAVING table_type IN ('TABLE', 'VIEW')
 		ORDER BY table_type, table_schema, table_name`,
 		Expected: []sql.Row{{"mydb", "mytable", "TABLE"}},
-	},
-	{
-		Query: "SELECT REGEXP_LIKE('testing', 'TESTING');",
-		Expected: []sql.Row{
-			{1},
-		},
-	},
-	{
-		Query: "SELECT REGEXP_LIKE('testing', 'TESTING') FROM mytable;",
-		Expected: []sql.Row{
-			{1},
-			{1},
-			{1},
-		},
-	},
-	{
-		Query: "SELECT i, s, REGEXP_LIKE(s, '[a-z]+d row') FROM mytable;",
-		Expected: []sql.Row{
-			{1, "first row", 0},
-			{2, "second row", 1},
-			{3, "third row", 1},
-		},
-	},
-	{
-		Query:    `SELECT REGEXP_REPLACE("0123456789", "[0-4]", "X")`,
-		Expected: []sql.Row{{"XXXXX56789"}},
-	},
-	{
-		Query:    `SELECT REGEXP_REPLACE("0123456789", "[0-4]", "X", 2)`,
-		Expected: []sql.Row{{"0XXXX56789"}},
-	},
-	{
-		Query:    `SELECT REGEXP_REPLACE("0123456789", "[0-4]", "X", 2, 2)`,
-		Expected: []sql.Row{{"01X3456789"}},
-	},
-	{
-		Query:    `SELECT REGEXP_REPLACE("TEST test TEST", "[a-z]", "X", 1, 0, "i")`,
-		Expected: []sql.Row{{"XXXX XXXX XXXX"}},
-	},
-	{
-		Query:    `SELECT REGEXP_REPLACE("TEST test TEST", "[a-z]", "X", 1, 0, "c")`,
-		Expected: []sql.Row{{"TEST XXXX TEST"}},
-	},
-	{
-		Query:    `SELECT REGEXP_REPLACE(CONCAT("abc123"), "[0-4]", "X")`,
-		Expected: []sql.Row{{"abcXXX"}},
-	},
-	{
-		Query: `SELECT * FROM mytable WHERE s LIKE REGEXP_REPLACE("123456%r1o2w", "[0-9]", "")`,
-		Expected: []sql.Row{
-			{1, "first row"},
-			{2, "second row"},
-			{3, "third row"},
-		},
-	},
-	{
-		Query: `SELECT REGEXP_REPLACE(s, "[a-z]", "X") from mytable`,
-		Expected: []sql.Row{
-			{"XXXXX XXX"},
-			{"XXXXXX XXX"},
-			{"XXXXX XXX"},
-		},
-	},
-	{
-		Query:    `SELECT 20 REGEXP '^[-]?2[0-9]+$'`,
-		Expected: []sql.Row{{true}},
-	},
-	{
-		Query:    `SELECT 30 REGEXP '^[-]?2[0-9]+$'`,
-		Expected: []sql.Row{{false}},
-	},
-	{
-		Query: "SELECT * FROM newlinetable WHERE s LIKE '%text%'",
-		Expected: []sql.Row{
-			{int64(1), "\nthere is some text in here"},
-			{int64(2), "there is some\ntext in here"},
-			{int64(3), "there is some text\nin here"},
-			{int64(4), "there is some text in here\n"},
-			{int64(5), "there is some text in here"},
-		},
 	},
 	{
 		Query:    `SELECT i FROM mytable WHERE i = (SELECT 1)`,
@@ -6418,6 +7617,24 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
+		Query: "SELECT CASE WHEN COUNT( * ) THEN 10 * CAST(-19 AS SIGNED ) + CAST(82 AS DECIMAL) END;",
+		Expected: []sql.Row{
+			{"-108"},
+		},
+	},
+	{
+		Query: "SELECT CASE WHEN COUNT( * ) THEN 10.0 * CAST(2012 AS UNSIGNED) + CAST(82 AS CHAR) END;",
+		Expected: []sql.Row{
+			{20202.0},
+		},
+	},
+	{
+		Query: "SELECT CASE WHEN COUNT( * ) THEN 10.0 * CAST(1234 AS DATE) + CAST(82 AS CHAR) END;",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
 		Query:    "SELECT 2.0 + CAST(5 AS DECIMAL)",
 		Expected: []sql.Row{{"7.0"}},
 	},
@@ -6429,6 +7646,19 @@ var QueryTests = []QueryTest{
 		Query:    `SELECT ALL - - 20 * - CASE + AVG ( ALL + + 89 ) WHEN - 66 THEN NULL WHEN - 15 THEN 38 * COUNT( * ) * MIN( DISTINCT - + 88 ) - MIN( ALL + 0 ) - - COUNT( * ) + - 0 + - 14 * + ( 98 ) * + 70 * 14 * + 57 * 48 - 53 + + 7 END * + 78 + - 11 * + 29 + + + 46 + + 10 + + ( - 83 ) * - - 74 / - 8 + 18`,
 		Expected: []sql.Row{{nil}},
 	},
+	{
+		Query: "select cast(X'9876543210' as char(10))",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query: "select cast(X'9876543210' as binary)",
+		Expected: []sql.Row{
+			{[]uint8{0x98, 0x76, 0x54, 0x32, 0x10}},
+		},
+	},
+
 	{
 		Query:    "SELECT 1/0 FROM dual",
 		Expected: []sql.Row{{nil}},
@@ -6761,6 +7991,11 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{{true}},
 	},
 	{
+		// https://github.com/dolthub/dolt/issues/7656
+		Query:    "select json_contains(cast('[1, 2]' as json), cast(cast(1 as signed) as json));",
+		Expected: []sql.Row{{true}},
+	},
+	{
 		Query: "select one_pk.pk, one_pk.c1 from one_pk join two_pk on one_pk.c1 = two_pk.c1 order by two_pk.c1",
 		Expected: []sql.Row{
 			{0, 0},
@@ -6782,15 +8017,16 @@ var QueryTests = []QueryTest{
 		},
 	},
 	{
-		Query: `SELECT JSON_OBJECT(JSON_OBJECT("foo", "bar"), 10);`,
+		SkipServerEngine: true, // the over the wire result need the double quotes to be escaped
+		Query:            `SELECT JSON_OBJECT(JSON_OBJECT("foo", "bar"), 10);`,
 		Expected: []sql.Row{
-			{types.MustJSON(`{"{\"foo\":\"bar\"}": 10}`)},
+			{types.MustJSON(`{"{\"foo\": \"bar\"}": 10}`)},
 		},
 	},
 	{
 		Query: `SELECT JSON_OBJECT(true, 10);`,
 		Expected: []sql.Row{
-			{types.MustJSON(`{"true": 10}`)},
+			{types.MustJSON(`{"1": 10}`)},
 		},
 	},
 	{
@@ -6836,6 +8072,14 @@ var QueryTests = []QueryTest{
 		Query: `SELECT 1 from dual WHERE EXISTS (SELECT NULL from dual);`,
 		Expected: []sql.Row{
 			{1},
+		},
+	},
+	{
+		Query: `SELECT i FROM mytable WHERE EXISTS (SELECT 1 from mytable) AND i IS NOT NULL;`,
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
 		},
 	},
 	{
@@ -6886,41 +8130,70 @@ var QueryTests = []QueryTest{
 		Query:    `START TRANSACTION READ WRITE`,
 		Expected: []sql.Row{},
 	},
+	// show status like ... is case-insensitive
 	{
-		Query: `SHOW STATUS LIKE 'use_secondary_engine'`,
+		Query: `SHOW STATUS LIKE 'aborted\_clients'`,
 		Expected: []sql.Row{
-			{"use_secondary_engine", "ON"},
+			{"Aborted_clients", uint64(0)},
 		},
 	},
 	{
-		Query: `SHOW GLOBAL STATUS LIKE 'admin_port'`,
+		Query: `SHOW STATUS LIKE 'Aborted_clients'`,
 		Expected: []sql.Row{
-			{"admin_port", 33062},
+			{"Aborted_clients", uint64(0)},
 		},
 	},
 	{
-		Query: `SHOW SESSION STATUS LIKE 'auto_increment_increment'`,
+		Query: `SHOW GLOBAL STATUS LIKE 'Aborted_clients'`,
 		Expected: []sql.Row{
-			{"auto_increment_increment", 1},
+			{"Aborted_clients", uint64(0)},
 		},
 	},
 	{
-		Query:    `SHOW GLOBAL STATUS LIKE 'use_secondary_engine'`,
+		Query: `SHOW GLOBAL STATUS LIKE 'Bytes_sent'`,
+		Expected: []sql.Row{
+			{"Bytes_sent", uint64(0)},
+		},
+	},
+	{
+		Query: `SHOW SESSION STATUS LIKE 'Bytes_sent'`,
+		Expected: []sql.Row{
+			{"Bytes_sent", uint64(0)},
+		},
+	},
+	{
+		Query: `SHOW GLOBAL STATUS LIKE 'Com\_stmt\_%'`,
+		Expected: []sql.Row{
+			{"Com_stmt_close", uint64(0)},
+			{"Com_stmt_execute", uint64(0)},
+			{"Com_stmt_fetch", uint64(0)},
+			{"Com_stmt_prepare", uint64(0)},
+			{"Com_stmt_reprepare", uint64(0)},
+			{"Com_stmt_reset", uint64(0)},
+			{"Com_stmt_send_long_data", uint64(0)},
+		},
+	},
+	{
+		Query: `SHOW SESSION STATUS LIKE 'Com\_stmt\_%'`,
+		Expected: []sql.Row{
+			{"Com_stmt_close", uint64(0)},
+			{"Com_stmt_execute", uint64(0)},
+			{"Com_stmt_fetch", uint64(0)},
+			{"Com_stmt_prepare", uint64(0)},
+			{"Com_stmt_reprepare", uint64(0)},
+			{"Com_stmt_reset", uint64(0)},
+			{"Com_stmt_send_long_data", uint64(0)},
+		},
+	},
+	{
+		Query: `SHOW SESSION STATUS LIKE 'Ssl_cipher'`,
+		Expected: []sql.Row{
+			{"Ssl_cipher", ""},
+		},
+	},
+	{
+		Query:    `SHOW SESSION STATUS WHERE Value < 0`,
 		Expected: []sql.Row{},
-	},
-	{
-		Query:    `SHOW SESSION STATUS LIKE 'version'`,
-		Expected: []sql.Row{},
-	},
-	{
-		Query:    `SHOW SESSION STATUS LIKE 'Ssl_cipher'`,
-		Expected: []sql.Row{}, // TODO: should be added at some point
-	},
-	{
-		Query: `SHOW SESSION STATUS WHERE Value < 0`,
-		Expected: []sql.Row{
-			{"optimizer_trace_offset", -1},
-		},
 	},
 	{
 		Query: `SELECT a.* FROM invert_pk as a, invert_pk as b WHERE a.y = b.z`,
@@ -6985,6 +8258,10 @@ var QueryTests = []QueryTest{
 		Expected: []sql.Row{
 			{false},
 		},
+	},
+	{
+		Query:    `select instr(REPLACE(CONVERT(UUID() USING utf8mb4), '-', ''), '-')`,
+		Expected: []sql.Row{{0}},
 	},
 	{
 		Query:    `select * from mytable where 1 = 0 order by i asc`,
@@ -7236,7 +8513,7 @@ exists (select * from xy where
 	},
 	{
 		// relation is a group by
-		Query: "select a1.a from (select * from ab group by a, b) a1 where exists (select a from xy where 1 = 0);",
+		Query: "select a1.a from (select * from ab group by a, b) a1 where exists (select x from xy where 1 = 0);",
 	},
 	{
 		// relation is a window
@@ -7344,74 +8621,126 @@ SELECT * FROM my_cte;`,
 			},
 		},
 	},
-}
+	// Regression test for https://github.com/dolthub/dolt/issues/5656
+	{
+		Query: "select count((select * from (select pk from one_pk limit 1) as sq)) from one_pk;",
+		Expected: []sql.Row{
+			{4},
+		},
+	},
+	{
+		Query: "select find_in_set('second row', s) from mytable;",
+		Expected: []sql.Row{
+			{0},
+			{1},
+			{0},
+		},
+	},
+	{
+		Query: "select find_in_set(s, 'first row,second row,third row') from mytable;",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "select i from mytable where find_in_set(s, 'first row,second row,third row') = 2;",
+		Expected: []sql.Row{
+			{2},
+		},
+	},
+	{
+		// Original Issue: https://github.com/dolthub/dolt/issues/5714
+		Query: `
+	
+	SELECT COUNT(*)
+	FROM keyless
+	WHERE keyless.c0 IN (
+	
+		WITH RECURSIVE cte(depth, i, j) AS (
+		    SELECT 0, T1.c0, T1.c1
+		    FROM keyless T1
+		    WHERE T1.c0 = 0
+	
+		    UNION ALL
+	
+		    SELECT cte.depth + 1, cte.i, T2.c1 + 1
+		    FROM cte, keyless T2
+		    WHERE cte.depth = T2.c0
+		)
+	
+		SELECT U0.c0
+		FROM keyless U0, cte
+		WHERE cte.j = keyless.c0
+	
+	)
+    ORDER BY c0;
+`,
+		Expected: []sql.Row{
+			{4},
+		},
+	},
+	{
+		// Original Issue: https://github.com/dolthub/dolt/issues/5714
+		// Similar, but this time the subquery is on the left
+		Query: `
+	
+	SELECT COUNT(*)
+	FROM keyless
+	WHERE keyless.c0 IN (
+	
+		WITH RECURSIVE cte(depth, i, j) AS (
+		    SELECT 0, T1.c0, T1.c1
+		    FROM keyless T1
+		    WHERE T1.c0 = 0
+	
+		    UNION ALL
+	
+		    SELECT cte.depth + 1, cte.i, T2.c1 + 1
+		    FROM cte, keyless T2
+		    WHERE cte.depth = T2.c0
+		)
+	
+		SELECT U0.c0
+		FROM cte, keyless U0 
+		WHERE cte.j = keyless.c0
+		
+	)
+    ORDER BY c0;
+`,
+		Expected: []sql.Row{
+			{4},
+		},
+	},
+	{
+		Query:    `SELECT SUM(0) * -1`,
+		Expected: []sql.Row{{0.0}},
+	},
 
-var KeylessQueries = []QueryTest{
 	{
-		Query: "SELECT * FROM keyless ORDER BY c0",
+		Query: `WITH RECURSIVE
+rt (foo) AS (
+ SELECT 1 as foo
+ UNION ALL
+ SELECT foo + 1 as foo FROM rt WHERE foo < 5
+),
+ladder (depth, foo) AS (
+ SELECT 1 as depth, NULL as foo from rt
+ UNION ALL
+ SELECT ladder.depth + 1 as depth, rt.foo
+ FROM ladder JOIN rt WHERE ladder.foo = rt.foo
+)
+SELECT * FROM ladder;`,
 		Expected: []sql.Row{
-			{0, 0},
-			{1, 1},
-			{1, 1},
-			{2, 2},
+			{1, nil},
+			{1, nil},
+			{1, nil},
+			{1, nil},
+			{1, nil},
 		},
 	},
-	{
-		Query: "SELECT * FROM keyless ORDER BY c1 DESC",
-		Expected: []sql.Row{
-			{2, 2},
-			{1, 1},
-			{1, 1},
-			{0, 0},
-		},
-	},
-	{
-		Query: "SELECT * FROM keyless JOIN myTable where c0 = i",
-		Expected: []sql.Row{
-			{1, 1, 1, "first row"},
-			{1, 1, 1, "first row"},
-			{2, 2, 2, "second row"},
-		},
-	},
-	{
-		Query: "SELECT * FROM myTable JOIN keyless WHERE i = c0 ORDER BY i",
-		Expected: []sql.Row{
-			{1, "first row", 1, 1},
-			{1, "first row", 1, 1},
-			{2, "second row", 2, 2},
-		},
-	},
-	{
-		Query: "DESCRIBE keyless",
-		Expected: []sql.Row{
-			{"c0", "bigint", "YES", "", "NULL", ""},
-			{"c1", "bigint", "YES", "", "NULL", ""},
-		},
-	},
-	{
-		Query: "SHOW COLUMNS FROM keyless",
-		Expected: []sql.Row{
-			{"c0", "bigint", "YES", "", "NULL", ""},
-			{"c1", "bigint", "YES", "", "NULL", ""},
-		},
-	},
-	{
-		Query: "SHOW FULL COLUMNS FROM keyless",
-		Expected: []sql.Row{
-			{"c0", "bigint", nil, "YES", "", "NULL", "", "", ""},
-			{"c1", "bigint", nil, "YES", "", "NULL", "", "", ""},
-		},
-	},
-	{
-		Query: "SHOW CREATE TABLE keyless",
-		Expected: []sql.Row{
-			{"keyless", "CREATE TABLE `keyless` (\n  `c0` bigint,\n  `c1` bigint\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"},
-		},
-	},
-}
 
-// BrokenQueries are queries that are known to be broken in the engine.
-var BrokenQueries = []QueryTest{
 	{
 		// natural join filter columns do not hide duplicated columns
 		Query: "select t2.* from mytable t1 natural join mytable t2 join othertable t3 on t2.i = t3.i2;",
@@ -7431,40 +8760,6 @@ var BrokenQueries = []QueryTest{
 		},
 	},
 	{
-		// natural join w/ inner join
-		Query: "select * from mytable t1 natural join mytable t2 join othertable t3 on t2.i = t3.i2;",
-		Expected: []sql.Row{
-			{1, "first row", "third", 1},
-			{2, "second row", "second", 2},
-			{3, "third row", "first", 3},
-		},
-	},
-	{
-		// mysql is case-sensitive with CTE name
-		Query:    "with recursive MYTABLE(j) as (select 2 union select MYTABLE.j from MYTABLE join mytable on MYTABLE.j = mytable.i) select j from MYTABLE",
-		Expected: []sql.Row{{2}},
-	},
-	{
-		// mysql is case-sensitive with CTE name
-		Query:    "with recursive MYTABLE(j) as (select 2 union select MYTABLE.j from MYTABLE join mytable on MYTABLE.j = mytable.i) select i from mytable;",
-		Expected: []sql.Row{{1}, {2}, {3}},
-	},
-	{
-		// edge case where mysql moves an orderby between scopes
-		Query:    "with a(j) as (select 1), b(i) as (select 2) (select j from a union select i from b order by 1 desc) union select j from a;",
-		Expected: []sql.Row{{2}, {1}},
-	},
-	{
-		// mysql converts boolean to int8
-		Query:    "with a(j) as (select 1 union select 2 union select 3), b(i) as (select 2 union select 3) select (3,4) in (select a.j, b.i+1 from a, b where a.j = b.i) as k group by k having k = 1;",
-		Expected: []sql.Row{{1}},
-	},
-	{
-		// mysql converts boolean to int8 and deduplicates with other 1
-		Query:    "With recursive a(x) as (select 1 union select 2 union select x in (select t1.i from mytable t1) from a) select x from a;",
-		Expected: []sql.Row{{1}, {2}},
-	},
-	{
 		// mysql overwrites outer CTEs on seeing inner CTE definition
 		Query:    "with a(j) as (select 1) ( with c(k) as (select 3) select k from c union select 6) union select k from c;",
 		Expected: []sql.Row{{3}, {6}},
@@ -7473,52 +8768,27 @@ var BrokenQueries = []QueryTest{
 		Query:    "SELECT pk1, SUM(c1) FROM two_pk",
 		Expected: []sql.Row{{0, 60.0}},
 	},
-	// this doesn't parse in MySQL (can't use an alias in a where clause), panics in engine
-	{
-		Query: `SELECT pk, (SELECT max(pk) FROM one_pk WHERE pk < opk.pk) AS x 
-						FROM one_pk opk WHERE x > 0 ORDER BY x`,
-		Expected: []sql.Row{
-			{2, 1},
-			{3, 2},
-		},
-	},
-	{
-		Query: `SELECT pk,
-					(SELECT max(pk) FROM one_pk WHERE pk < opk.pk) AS min,
-					(SELECT min(pk) FROM one_pk WHERE pk > opk.pk) AS max
-					FROM one_pk opk
-					WHERE max > 1
-					ORDER BY max;`,
-		Expected: []sql.Row{
-			{1, 0, 2},
-			{2, 1, 3},
-		},
-	},
-	// AVG gives the wrong result for the first row
 	{
 		Query: `SELECT pk,
 						(SELECT sum(c1) FROM two_pk WHERE c1 IN (SELECT c4 FROM two_pk WHERE c3 > opk.c5)) AS sum,
 						(SELECT avg(c1) FROM two_pk WHERE pk2 IN (SELECT pk2 FROM two_pk WHERE c1 < opk.c2)) AS avg
 					FROM one_pk opk ORDER BY pk`,
 		Expected: []sql.Row{
-			{0, 60.0, nil},
-			{1, 50.0, 10.0},
-			{2, 30.0, 15.0},
+			{0, nil, 10.0},
+			{1, nil, 15.0},
+			{2, nil, 15.0},
 			{3, nil, 15.0},
 		},
 	},
-	// something broken in the resolve_having analysis for this
 	{
-		Query: `SELECT column_0, sum(column_1) FROM 
-			(values row(1,1), row(1,3), row(2,2), row(2,5), row(3,9)) a 
+		Query: `SELECT column_0, sum(column_1) FROM
+			(values row(1,1), row(1,3), row(2,2), row(2,5), row(3,9)) a
 			group by 1 having avg(column_1) > 2 order by 1`,
 		Expected: []sql.Row{
 			{2, 7.0},
 			{3, 9.0},
 		},
 	},
-	// The outer CTE currently resolves before the inner one, which causes
-	// this to return { {1}, {1}, } instead.
 	{
 		Query: `WITH t AS (SELECT 1) SELECT * FROM t UNION (WITH t AS (SELECT 2) SELECT * FROM t)`,
 		Expected: []sql.Row{
@@ -7528,91 +8798,23 @@ var BrokenQueries = []QueryTest{
 	},
 	{
 		Query: "SELECT json_array() FROM dual;",
-	},
-	{
-		Query: "SELECT json_array_append() FROM dual;",
-	},
-	{
-		Query: "SELECT json_array_insert() FROM dual;",
-	},
-	{
-		Query: "SELECT json_contains() FROM dual;",
-	},
-	{
-		Query: "SELECT json_contains_path() FROM dual;",
-	},
-	{
-		Query: "SELECT json_depth() FROM dual;",
-	},
-	{
-		Query: "SELECT json_insert() FROM dual;",
-	},
-	{
-		Query: "SELECT json_keys() FROM dual;",
-	},
-	{
-		Query: "SELECT json_length() FROM dual;",
-	},
-	{
-		Query: "SELECT json_merge_patch() FROM dual;",
-	},
-	{
-		Query: "SELECT json_merge_preserve() FROM dual;",
+		Expected: []sql.Row{
+			{types.MustJSON(`[]`)},
+		},
 	},
 	{
 		Query: "SELECT json_object() FROM dual;",
+		Expected: []sql.Row{
+			{types.MustJSON(`{}`)},
+		},
 	},
 	{
-		Query: "SELECT json_overlaps() FROM dual;",
+		Query: `SELECT json_depth('{"a": 1, "b": {"aa": 1, "bb": {"aaa": 1, "bbb": {"aaaa": 1}}}}') FROM dual;`,
+		Expected: []sql.Row{
+			{5},
+		},
 	},
-	{
-		Query: "SELECT json_pretty() FROM dual;",
-	},
-	{
-		Query: "SELECT json_quote() FROM dual;",
-	},
-	{
-		Query: "SELECT json_remove() FROM dual;",
-	},
-	{
-		Query: "SELECT json_replace() FROM dual;",
-	},
-	{
-		Query: "SELECT json_schema_valid() FROM dual;",
-	},
-	{
-		Query: "SELECT json_schema_validation_report() FROM dual;",
-	},
-	{
-		Query: "SELECT json_set() FROM dual;",
-	},
-	{
-		Query: "SELECT json_search() FROM dual;",
-	},
-	{
-		Query: "SELECT json_storage_free() FROM dual;",
-	},
-	{
-		Query: "SELECT json_storage_size() FROM dual;",
-	},
-	{
-		Query: "SELECT json_type() FROM dual;",
-	},
-	{
-		Query: "SELECT json_table() FROM dual;",
-	},
-	{
-		Query: "SELECT json_valid() FROM dual;",
-	},
-	{
-		Query: "SELECT json_value() FROM dual;",
-	},
-	// This gets an error "unable to cast "second row" of type string to int64"
-	// Should throw sql.ErrAmbiguousColumnInOrderBy
-	{
-		Query: `SELECT s as i, i as i from mytable order by i`,
-	},
-	// These three queries return the right results, but the casing is wrong in the result schema.
+
 	{
 		Query: "SELECT i, I, s, S FROM mytable;",
 		Expected: []sql.Row{
@@ -7696,6 +8898,1420 @@ var BrokenQueries = []QueryTest{
 		Query:    `SELECT json_unquote(json_extract('{"hi":"there"}', '$.nope'))`,
 		Expected: []sql.Row{{nil}}, // currently returns string "null"
 	},
+	{
+		Query: "SELECT 1 FROM DUAL WHERE (1, null) != (0, null)",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "SELECT 1 FROM DUAL WHERE ('0', 0) = (0, '0')",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "SELECT c AS i_do_not_conflict, COUNT(*), MIN((SELECT COUNT(*) FROM (SELECT 1 AS d) b WHERE b.d = a.c)) FROM (SELECT 1 AS c) a GROUP BY i_do_not_conflict;",
+		Expected: []sql.Row{
+			{1, 1, 1},
+		},
+	},
+	{
+		Query: "SELECT c AS c, COUNT(*), MIN((SELECT COUNT(*) FROM (SELECT 1 AS d) b WHERE b.d = a.c)) FROM (SELECT 1 AS c) a GROUP BY a.c;",
+		Expected: []sql.Row{
+			{1, 1, 1},
+		},
+	},
+	{
+		// Results should be sorted, but they are not
+		Query: `
+SELECT * FROM
+(SELECT * FROM mytable) t
+UNION ALL
+(SELECT * FROM mytable)
+ORDER BY 1;`,
+		Expected: []sql.Row{
+			{1, "first row"},
+			{1, "first row"},
+			{2, "second row"},
+			{2, "second row"},
+			{3, "third row"},
+			{3, "third row"},
+		},
+	},
+
+	{
+		Query: "select x from xy where x > 0 and x <= 2 order by x",
+		Expected: []sql.Row{
+			{1},
+			{2},
+		},
+	},
+	{
+		Query: "select * from xy where y < 1 or y > 2 order by y",
+		Expected: []sql.Row{
+			{1, 0},
+			{3, 3},
+		},
+	},
+	{
+		Query: "select * from xy where y < 1 or y > 2 order by y desc",
+		Expected: []sql.Row{
+			{3, 3},
+			{1, 0},
+		},
+	},
+	{
+		Query: "select * from xy where x in (3, 0, 1) order by x",
+		Expected: []sql.Row{
+			{0, 2},
+			{1, 0},
+			{3, 3},
+		},
+	},
+	{
+		Query: "select * from xy where x in (3, 0, 1) order by x desc",
+		Expected: []sql.Row{
+			{3, 3},
+			{1, 0},
+			{0, 2},
+		},
+	},
+	{
+		Query: "select * from xy where y in (3, 0, 1) order by y",
+		Expected: []sql.Row{
+			{1, 0},
+			{2, 1},
+			{3, 3},
+		},
+	},
+	{
+		Query: "select * from xy where y in (3, 0, 1) order by y desc",
+		Expected: []sql.Row{
+			{3, 3},
+			{2, 1},
+			{1, 0},
+		},
+	},
+	{
+		Query: "select * from xy_hasnull_idx order by y",
+		Expected: []sql.Row{
+			{3, nil},
+			{1, 0},
+			{2, 1},
+			{0, 2},
+		},
+	},
+	{
+		Query: "select * from xy_hasnull_idx order by y desc",
+		Expected: []sql.Row{
+			{0, 2},
+			{2, 1},
+			{1, 0},
+			{3, nil},
+		},
+	},
+	{
+		Query: "select * from xy_hasnull_idx where y < 1 or y > 1 order by y desc",
+		Expected: []sql.Row{
+			{0, 2},
+			{1, 0},
+		},
+	},
+	{
+		Query: "select * from xy_hasnull_idx where y < 1 or y > 1 or y is null order by y desc",
+		Expected: []sql.Row{
+			{0, 2},
+			{1, 0},
+			{3, nil},
+		},
+	},
+	{
+		Query: "select * from xy_hasnull_idx where y in (0, 2) or y is null order by y",
+		Expected: []sql.Row{
+			{3, nil},
+			{1, 0},
+			{0, 2},
+		},
+	},
+	{
+		Query: "select x as xx, y as yy from xy_hasnull_idx order by yy desc",
+		Expected: []sql.Row{
+			{0, 2},
+			{2, 1},
+			{1, 0},
+			{3, nil},
+		},
+	},
+	{
+		Query: "select x as xx, y as yy from xy_hasnull_idx order by YY desc",
+		Expected: []sql.Row{
+			{0, 2},
+			{2, 1},
+			{1, 0},
+			{3, nil},
+		},
+	},
+	{
+		Query: "select * from xy_hasnull_idx order by Y desc",
+		Expected: []sql.Row{
+			{0, 2},
+			{2, 1},
+			{1, 0},
+			{3, nil},
+		},
+	},
+
+	{
+		Query: "select max(x) from xy",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: "select min(x) from xy",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "select max(y) from xy",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: "select max(x)+100 from xy",
+		Expected: []sql.Row{
+			{103},
+		},
+	},
+	{
+		Query: "select max(x) as xx from xy",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: "select 1, 2.0, '3', max(x) from xy",
+		Expected: []sql.Row{
+			{1, "2.0", "3", 3},
+		},
+	},
+	{
+		Query: "select min(x) from xy where x > 0",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "select max(x) from xy where x < 3",
+		Expected: []sql.Row{
+			{2},
+		},
+	},
+	{
+		Query: "select min(x) from xy where y > 0",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "select max(x) from xy where y < 3",
+		Expected: []sql.Row{
+			{2},
+		},
+	},
+	{
+		Query: "select * from (select max(x) from xy) sq",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: "with cte(i) as (select max(x) from xy) select i + 100 from cte",
+		Expected: []sql.Row{
+			{103},
+		},
+	},
+	{
+		Query: "with cte(i) as (select x from xy) select max(i) from cte",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: "select max(x) from xy group by y",
+		Expected: []sql.Row{
+			{0},
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "select max(x) from xy join uv where x = u",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: `
+select * from mytable,
+	lateral (
+	with recursive cte(a) as (
+		select y from xy
+		union
+		select x from cte
+		join
+		xy
+		on x = a
+		)
+	select * from cte
+) sqa 
+where i = a
+order by i;`,
+		Expected: []sql.Row{
+			{1, "first row", 1},
+			{2, "second row", 2},
+			{3, "third row", 3},
+		},
+	},
+	{
+		Query: `
+select * from mytable,
+	lateral (
+	with recursive cte(a) as (
+		select y from xy
+		union
+		select x from cte
+		join
+		(
+			select * 
+			from xy
+			where x = 1
+		 ) sqa1
+		on x = a
+		limit 3
+		)
+	select * from cte
+) sqa2
+where i = a
+order by i;`,
+		Expected: []sql.Row{
+			{1, "first row", 1},
+			{2, "second row", 2},
+		},
+	},
+	{
+		Query: `
+select a, b
+from ab as ab2
+where exists (
+    select *
+    from ab
+	where ab.b = (
+        select max(v)
+        from uv
+        where uv.v = ab2.a and uv.v = ab.a
+    )
+);`,
+		Expected: []sql.Row{
+			{2, 2},
+		},
+	},
+	{
+		Query: `
+select x, y
+from xy as xy2
+where exists (
+    select *
+    from xy
+        where xy.y = (
+        select max(v)
+        from uv
+        where uv.v = xy2.x and uv.v = xy.x
+    )
+)
+order by x, y;`,
+		Expected: []sql.Row{},
+	},
+	{
+		Query: `select 1 where cos(2)`,
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: `select 1 where sin(2)`,
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query:    `select 1 where sin(0)`,
+		Expected: []sql.Row{},
+	},
+	{
+		Query: `select acos(-2)`,
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query: `select asin(-2)`,
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query: `select 1 % acos(-2)`,
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query: "select dayname(123), dayname('abc')",
+		Expected: []sql.Row{
+			{nil, nil},
+		},
+	},
+	{
+		Query: `
+select
+   dayname(id),
+   dayname(i8),
+   dayname(i16),
+   dayname(i32),
+   dayname(i64),
+   dayname(u8),
+   dayname(u16),
+   dayname(u32),
+   dayname(u64),
+   dayname(f32),
+   dayname(f64),
+   dayname(ti),
+   dayname(da),
+   dayname(te),
+   dayname(bo),
+   dayname(js),
+   dayname(bl),
+   dayname(e1),
+   dayname(s1)
+from typestable`,
+		Expected: []sql.Row{
+			{
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				"Tuesday",
+				"Tuesday",
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+				nil,
+			},
+		},
+	},
+	{
+		// TODO: This goes past MySQL's range
+		Query: "select dayname('0000-00-00')",
+		Expected: []sql.Row{
+			{"Saturday"},
+		},
+	},
+	{
+		Query: "select * from mytable order by dayname(i)",
+		Expected: []sql.Row{
+			{1, "first row"},
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		Query: "select sqrt(-1) + 1",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query: "select sqrt(-1) + 1",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query:    "flush binary logs",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "flush engine logs",
+		Expected: []sql.Row{},
+	},
+	// TODO: this is the largest scale decimal we support, but it's not the largest MySQL supports
+	{
+		Query: "select round(5e29, -30)",
+		Expected: []sql.Row{
+			{1e30},
+		},
+	},
+	{
+		Query: "select 1 where (round('')) union all select 1 where (not (round(''))) union all select 1 where ((round('')) is null);",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "select 1 in (null, 0.8)",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query: "select -1 in (null, sin(5))",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+	{
+		Query:    "select 1 where (1 in (null, 0.8))",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "select -1 where (1 in (null, sin(5)))",
+		Expected: []sql.Row{},
+	},
+	{
+		Query:    "select * from mytable where (i in (null, 0.8, 1.5, 2.999))",
+		Expected: []sql.Row{},
+	},
+	{
+		Query: "select * from mytable where (i BETWEEN (CASE 1 WHEN 2 THEN 1.0 ELSE (1||2) END) AND i)",
+		Expected: []sql.Row{
+			{1, "first row"},
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		Query: "select * from mytable where (i BETWEEN ('' BETWEEN '' AND ('' OR '#')) AND i)",
+		Expected: []sql.Row{
+			{1, "first row"},
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		Query: "select * from (select 'k' as k) sq join bigtable on t = k join xy where x between n and n;",
+		Expected: []sql.Row{
+			{"k", "k", 1, 1, 0},
+		},
+	},
+	{
+		Query: "select * from xy inner join uv on (xy.x in (false in ('asdf')));",
+		Expected: []sql.Row{
+			{1, 0, 0, 1},
+			{1, 0, 1, 1},
+			{1, 0, 2, 2},
+			{1, 0, 3, 2},
+		},
+	},
+	{
+		Query: "select * from mytable where i > '-0.5';",
+		Expected: []sql.Row{
+			{1, "first row"},
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		Query: "select case when 1 then 59 + 81 / 1 end;",
+		Expected: []sql.Row{
+			{"140.0000"},
+		},
+	},
+	{
+		Query: "select case 1 when 2 then null else (6 * 2) / 1 end;",
+		Expected: []sql.Row{
+			{"12.0000"},
+		},
+	},
+	{
+		Query: "select case 1 when 1 then (6 * 2) / 1 when 2 then null else null end;",
+		Expected: []sql.Row{
+			{"12.0000"},
+		},
+	},
+	{
+		Query: "select * from one_pk_two_idx where v1 < 4 and v2 < 2 or v2 > 3 order by v1",
+		Expected: []sql.Row{
+			{0, 0, 0},
+			{1, 1, 1},
+			{4, 4, 4},
+			{5, 5, 5},
+			{6, 6, 6},
+			{7, 7, 7},
+		},
+	},
+	{
+		Query: "select length(space(i)) from mytable;",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "select concat(space(i), 'a') from mytable;",
+		Expected: []sql.Row{
+			{" a"},
+			{"  a"},
+			{"   a"},
+		},
+	},
+	{
+		Query: "select space(i * 2) from mytable;",
+		Expected: []sql.Row{
+			{"  "},
+			{"    "},
+			{"      "},
+		},
+	},
+	{
+		Query: "select i + pi() from mytable;",
+		Expected: []sql.Row{
+			{4.141592653589793},
+			{5.141592653589793},
+			{6.141592653589793},
+		},
+	},
+	{
+		Query: "select i * pi() from mytable;",
+		Expected: []sql.Row{
+			{3.141592653589793},
+			{6.283185307179586},
+			{9.42477796076938},
+		},
+	},
+	{
+		Query: "select i / pi() from mytable;",
+		Expected: []sql.Row{
+			{0.3183098861837907},
+			{0.6366197723675814},
+			{0.954929658551372},
+		},
+	},
+	{
+		Query: "select exp(i) from mytable;",
+		Expected: []sql.Row{
+			{math.Exp(1)},
+			{math.Exp(2)},
+			{math.Exp(3)},
+		},
+	},
+	{
+		Query: "select bit_count(i), bit_count(-20 * i) from mytable;",
+		Expected: []sql.Row{
+			{1, 61},
+			{1, 60},
+			{2, 59},
+		},
+	},
+	{
+		Query: "select bit_count(binary 123456878901234567890);",
+		Expected: []sql.Row{
+			{73},
+		},
+	},
+	{
+		Query: "select atan(i), atan2(i, i + 2) from mytable;",
+		Expected: []sql.Row{
+			{math.Atan2(1, 1), math.Atan2(1, 3)},
+			{math.Atan2(2, 1), math.Atan2(2, 4)},
+			{math.Atan2(3, 1), math.Atan2(3, 5)},
+		},
+	},
+	{
+		Query: "select elt(i, 'a', 'b') from mytable;",
+		Expected: []sql.Row{
+			{"a"},
+			{"b"},
+			{nil},
+		},
+	},
+	{
+		Query: "select field(i, '1', '2', '3') from mytable;",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+	{
+		Query: "select ord(s), ord(concat('asdf', s)) from mytable;",
+		Expected: []sql.Row{
+			{102, 97},
+			{115, 97},
+			{116, 97},
+		},
+	},
+	{
+		Query: "select char(i, i + 10, pi()) from mytable;",
+		Expected: []sql.Row{
+			{[]byte{0x01, 0x0B, 0x03}},
+			{[]byte{0x02, 0x0C, 0x03}},
+			{[]byte{0x03, 0x0D, 0x03}},
+		},
+	},
+	{
+		Query: "select char(97, 98, 99 using utf8mb4);",
+		Expected: []sql.Row{
+			{"abc"},
+		},
+	},
+	{
+		Query: "select count(distinct cast(i as decimal)) from mytable;",
+		Expected: []sql.Row{
+			{3},
+		},
+	},
+	{
+		Query: "select count(distinct null);",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "select 1/2.0 + 1",
+		Expected: []sql.Row{
+			{"1.5000"},
+		},
+	},
+	{
+		Query:    "select 1 where if('', 1, char(''));",
+		Expected: []sql.Row{},
+	},
+	{
+		Query: "select 1 where if('', char(''), 1);",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "select 1 where if(char(''), 0, 1);",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "select 1 where if(char('123'), 0, 1);",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "select 1 where 0 = if('', 1, char(''));",
+		Expected: []sql.Row{
+			{1},
+		},
+	},
+	{
+		Query: "select if('', 1, char(''));",
+		Expected: []sql.Row{
+			{[]byte{0}},
+		},
+	},
+	{
+		Query: "select if(char(''), 'true', 'false');",
+		Expected: []sql.Row{
+			{"false"},
+		},
+	},
+	{
+		Query: "select if(char('0'), 'true', 'false');",
+		Expected: []sql.Row{
+			{"false"},
+		},
+	},
+	{
+		Query: "select if(char('1'), 'true', 'false');",
+		Expected: []sql.Row{
+			{"false"},
+		},
+	},
+	{
+		Query: "select if(cast(1 as binary), 'true', 'false');",
+		Expected: []sql.Row{
+			{"true"},
+		},
+	},
+	{
+		Query: "select if(cast(0 as binary), 'true', 'false');",
+		Expected: []sql.Row{
+			{"false"},
+		},
+	},
+	{
+		Query: "select cast(true as json) = true;",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast(false as json) = false;",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast(true as json) = 'true';",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(false as json) = 'false';",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(cast(true as json) as char) = 'true';",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast(cast(false as json) as char) = 'false';",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast(true as json) = 1;",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(true as json) = 0;",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(false as json) = 1;",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(false as json) = 0;",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(cast(true as json) as signed) = 1;",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast(cast(true as json) as signed) = 0;",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(cast(false as json) as signed) = 1;",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast(cast(false as json) as signed) = 0;",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+
+	{
+		Query: "select cast('true' as json) = 'true';",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: "select cast('true' as json) = true;",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast('false' as json) = false;",
+		Expected: []sql.Row{
+			{true},
+		},
+	},
+	{
+		Query: "select cast('false' as json) = 'false';",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+	{
+		Query: `SELECT json_type('{"a": [10, true, "abc"]}');`,
+		Expected: []sql.Row{
+			{"OBJECT"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract('{"a": [10, true, "abc"]}', '$.a'));`,
+		Expected: []sql.Row{
+			{"ARRAY"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract('{"a": [10, true, "abc"]}', '$.a[0]'));`,
+		Expected: []sql.Row{
+			{"INTEGER"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract('{"a": [10, true, "abc"]}', '$.a[1]'));`,
+		Expected: []sql.Row{
+			{"BOOLEAN"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract('{"a": [10, true, "abc"]}', '$.a[2]'));`,
+		Expected: []sql.Row{
+			{"STRING"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract('{"a": 123.456}', '$.a'));`,
+		Expected: []sql.Row{
+			{"DOUBLE"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract('{"a": null}', '$.a'));`,
+		Expected: []sql.Row{
+			{"NULL"},
+		},
+	},
+	{
+		Query: "SELECT json_type(cast(cast('2001-01-01 12:34:56.123456' as datetime) as json));",
+		Expected: []sql.Row{
+			{"DATETIME"},
+		},
+	},
+	{
+		Query: "SELECT json_type(cast(cast('2001-01-01 12:34:56.123456' as date) as json));",
+		Expected: []sql.Row{
+			{"DATE"},
+		},
+	},
+	{
+		Query: "select json_type(cast(cast(1 as unsigned) as json));",
+		Expected: []sql.Row{
+			{"UNSIGNED INTEGER"},
+		},
+	},
+	{
+		Query: "select json_type('4294967295');",
+		Expected: []sql.Row{
+			{"INTEGER"},
+		},
+	},
+	{
+		Query: "select json_type('4294967296');",
+		Expected: []sql.Row{
+			{"UNSIGNED INTEGER"},
+		},
+	},
+	{
+		Query: "SELECT json_type(cast(1.0 as json));",
+		Expected: []sql.Row{
+			{"DECIMAL"},
+		},
+	},
+	{
+		Query: "select json_type(cast(cast(2001 as year) as json));",
+		Expected: []sql.Row{
+			{"UNSIGNED INTEGER"},
+		},
+	},
+	{
+		Query: "select length(random_bytes(i)) from mytable;",
+		Expected: []sql.Row{
+			{1},
+			{2},
+			{3},
+		},
+	},
+
+	{
+		Query: "select to_days('2024-04-15');",
+		Expected: []sql.Row{
+			{739356},
+		},
+	},
+	{
+		Query: "select from_days(739356);",
+		Expected: []sql.Row{
+			{time.Date(2024, 4, 15, 0, 0, 0, 0, time.UTC)},
+		},
+	},
+	{
+		Query: "select last_day('2000-02-21');",
+		Expected: []sql.Row{
+			{time.Date(2000, 2, 29, 0, 0, 0, 0, time.UTC)},
+		},
+	},
+	{
+		Query: "select last_day('1999-11-05');",
+		Expected: []sql.Row{
+			{time.Date(1999, 11, 30, 0, 0, 0, 0, time.UTC)},
+		},
+	},
+
+	{
+		Query: "select cast(' \t 123 \t ' as signed);",
+		Expected: []sql.Row{
+			{123},
+		},
+	},
+	{
+		Query: "select cast('\n123\n' as signed);",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "select cast('\\0123\\0' as signed);",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "select cast(' \t \n\\0123 \t ' as signed);",
+		Expected: []sql.Row{
+			{0},
+		},
+	},
+	{
+		Query: "select cast(' \t 123 \t ' as unsigned);",
+		Expected: []sql.Row{
+			{uint64(123)},
+		},
+	},
+	{
+		Query: "select cast('\n123\n' as unsigned);",
+		Expected: []sql.Row{
+			{uint64(0)},
+		},
+	},
+	{
+		Query: "select cast('\\0123\\0' as unsigned);",
+		Expected: []sql.Row{
+			{uint64(0)},
+		},
+	},
+	{
+		Query: "select cast(' \t \n\\0123 \t ' as unsigned);",
+		Expected: []sql.Row{
+			{uint64(0)},
+		},
+	},
+	{
+		Query: "select cast(' \t \n \r 123.456 \r \t \n ' as decimal(10,3));",
+		Expected: []sql.Row{
+			{"123.456"},
+		},
+	},
+	{
+		Query: "select cast('\\0123\\0' as decimal(10,3));",
+		Expected: []sql.Row{
+			{"0.000"},
+		},
+	},
+	{
+		Query: "select cast(' \t \n\\0123 \t ' as decimal(10,3));",
+		Expected: []sql.Row{
+			{"0.000"},
+		},
+	},
+	{
+		Query: "select cast(' \t \n \r 123.456 \r \t \n ' as double);",
+		Expected: []sql.Row{
+			{123.456},
+		},
+	},
+	{
+		Query: "select cast('\\0123\\0' as double);",
+		Expected: []sql.Row{
+			{0.0},
+		},
+	},
+	{
+		Query: "select cast(' \t \n\\0123 \t ' as double);",
+		Expected: []sql.Row{
+			{0.0},
+		},
+	},
+	{
+		Query: "select cast(' \t \n \r 123.456 \r \t \n ' as float);",
+		Expected: []sql.Row{
+			{float32(123.456)},
+		},
+	},
+	{
+		Query: "select cast('\\0123\\0' as float);",
+		Expected: []sql.Row{
+			{float32(0)},
+		},
+	},
+	{
+		Query: "select cast(' \t \n\\0123 \t ' as float);",
+		Expected: []sql.Row{
+			{float32(0)},
+		},
+	},
+
+	{
+		Query: "select 'abc' like NULL",
+		Expected: []sql.Row{
+			{nil},
+		},
+	},
+
+	{
+		Query: "select icu_version()",
+		Expected: []sql.Row{
+			{"73.1"},
+		},
+	},
+
+	{
+		Query: "select get_format(date, 'usa')",
+		Expected: []sql.Row{
+			{"%m.%d.%Y"},
+		},
+	},
+	{
+		Query: "select date_format('2003-10-03', get_format(date, 'eur'))",
+		Expected: []sql.Row{
+			{"03.10.2003"},
+		},
+	},
+
+	{
+		Query: "select charset(null)",
+		Expected: []sql.Row{
+			{"binary"},
+		},
+	},
+	{
+		Query: "select charset(123)",
+		Expected: []sql.Row{
+			{"binary"},
+		},
+	},
+	{
+		Query: "select charset('abc')",
+		Expected: []sql.Row{
+			{"utf8mb4"},
+		},
+	},
+	{
+		Query: "select charset(convert('abc' using latin1))",
+		Expected: []sql.Row{
+			{"latin1"},
+		},
+	},
+	{
+		Query: "select uncompress(compress('thisisastring'))",
+		Expected: []sql.Row{
+			{[]byte{0x74, 0x68, 0x69, 0x73, 0x69, 0x73, 0x61, 0x73, 0x74, 0x72, 0x69, 0x6e, 0x67}},
+		},
+	},
+	{
+		Query: "select length(compress(repeat('a', 1000)))",
+		Expected: []sql.Row{
+			{24}, // 21 in MySQL because of library implementation differences
+		},
+	},
+	{
+		Query: "select length(uncompress(compress(repeat('a', 1000))))",
+		Expected: []sql.Row{
+			{1000},
+		},
+	},
+	{
+		Query: "select uncompressed_length(compress(repeat('a', 1000)))",
+		Expected: []sql.Row{
+			{uint32(1000)},
+		},
+	},
+
+	{
+		Query: `select distinct pk1 from two_pk order by pk1`,
+		Expected: []sql.Row{
+			{0},
+			{1},
+		},
+	},
+	{
+		Query: `select distinct pk2 from two_pk order by pk2`,
+		Expected: []sql.Row{
+			{0},
+			{1},
+		},
+	},
+	{
+		Query: `select distinct pk1 from two_pk order by pk2`,
+		Expected: []sql.Row{
+			{0},
+			{1},
+		},
+	},
+	{
+		Query: `select distinct pk2 from two_pk order by pk1`,
+		Expected: []sql.Row{
+			{0},
+			{1},
+		},
+	},
+	{
+		Query: `select distinct pk1, pk2 from two_pk order by pk1`,
+		Expected: []sql.Row{
+			{0, 0},
+			{0, 1},
+			{1, 0},
+			{1, 1},
+		},
+	},
+	{
+		Query: `select distinct pk1, pk2 from two_pk order by pk2`,
+		Expected: []sql.Row{
+			{0, 0},
+			{1, 0},
+			{0, 1},
+			{1, 1},
+		},
+	},
+	{
+		Query: `select distinct pk1, pk2 from two_pk order by pk1, pk2`,
+		Expected: []sql.Row{
+			{0, 0},
+			{0, 1},
+			{1, 0},
+			{1, 1},
+		},
+	},
+	{
+		Query: `select distinct pk1, pk2 from two_pk order by pk2, pk1`,
+		Expected: []sql.Row{
+			{0, 0},
+			{1, 0},
+			{0, 1},
+			{1, 1},
+		},
+	},
+	{
+		Query: `select distinct pk2, pk1 from two_pk order by pk1, pk2`,
+		Expected: []sql.Row{
+			{0, 0},
+			{1, 0},
+			{0, 1},
+			{1, 1},
+		},
+	},
+	{
+		Query: `select distinct pk2, pk1 from two_pk order by pk2, pk1`,
+		Expected: []sql.Row{
+			{0, 0},
+			{0, 1},
+			{1, 0},
+			{1, 1},
+		},
+	},
+	{
+		Query: `select distinct pk1 + 1 from two_pk order by pk1 + 1`,
+		Expected: []sql.Row{
+			{1},
+			{2},
+		},
+	},
+	{
+		Query: `select distinct pk2 + 1 from two_pk order by pk2 + 1`,
+		Expected: []sql.Row{
+			{1},
+			{2},
+		},
+	},
+
+	{
+		Query: "select @@sql_mode = 1",
+		Expected: []sql.Row{
+			{false},
+		},
+	},
+
+	{
+		Query:            "explain select 1",
+		SkipServerEngine: true,
+		Expected: []sql.Row{
+			{1, "SELECT", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", ""},
+		},
+	},
+	{
+		Query:            "explain plan select 1",
+		SkipServerEngine: true,
+		Expected: []sql.Row{
+			{"Project"},
+			{" ├─ columns: [1]"},
+			{" └─ Table"},
+			{"     └─ name: "},
+		},
+	},
+	{
+		Query:            "explain format=tree select 1",
+		SkipServerEngine: true,
+		Expected: []sql.Row{
+			{"Project"},
+			{" ├─ columns: [1]"},
+			{" └─ Table"},
+			{"     └─ name: "},
+		},
+	},
+}
+
+var KeylessQueries = []QueryTest{
+	{
+		Query: "SELECT * FROM keyless ORDER BY c0",
+		Expected: []sql.Row{
+			{0, 0},
+			{1, 1},
+			{1, 1},
+			{2, 2},
+		},
+	},
+	{
+		Query: "SELECT * FROM keyless ORDER BY c1 DESC",
+		Expected: []sql.Row{
+			{2, 2},
+			{1, 1},
+			{1, 1},
+			{0, 0},
+		},
+	},
+	{
+		Query: "SELECT * FROM keyless JOIN myTable where c0 = i",
+		Expected: []sql.Row{
+			{1, 1, 1, "first row"},
+			{1, 1, 1, "first row"},
+			{2, 2, 2, "second row"},
+		},
+	},
+	{
+		Query: "SELECT * FROM myTable JOIN keyless WHERE i = c0 ORDER BY i",
+		Expected: []sql.Row{
+			{1, "first row", 1, 1},
+			{1, "first row", 1, 1},
+			{2, "second row", 2, 2},
+		},
+	},
+	{
+		Query: "DESCRIBE keyless",
+		Expected: []sql.Row{
+			{"c0", "bigint", "YES", "", nil, ""},
+			{"c1", "bigint", "YES", "", nil, ""},
+		},
+	},
+	{
+		Query: "SHOW COLUMNS FROM keyless",
+		Expected: []sql.Row{
+			{"c0", "bigint", "YES", "", nil, ""},
+			{"c1", "bigint", "YES", "", nil, ""},
+		},
+	},
+	{
+		Query: "SHOW FULL COLUMNS FROM keyless",
+		Expected: []sql.Row{
+			{"c0", "bigint", nil, "YES", "", nil, "", "", ""},
+			{"c1", "bigint", nil, "YES", "", nil, "", "", ""},
+		},
+	},
+	{
+		Query: "SHOW CREATE TABLE keyless",
+		Expected: []sql.Row{
+			{"keyless", "CREATE TABLE `keyless` (\n  `c0` bigint,\n  `c1` bigint\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"},
+		},
+	},
+}
+
+// BrokenQueries are queries that are known to be broken in the engine.
+var BrokenQueries = []QueryTest{
+	// union and aggregation typing are tricky
+	{
+		Query: "with recursive t (n) as (select sum('1') from dual union all select (2.00) from dual) select sum(n) from t;",
+		Expected: []sql.Row{
+			{float64(3)},
+		},
+	},
+	{
+		Query: "with recursive t (n) as (select sum(1.0) from dual union all select n+1 from t where n < 10) select sum(n) from t;",
+		Expected: []sql.Row{
+			{"55.0"},
+		},
+	},
+	{
+		// mysql is case-sensitive with CTE name
+		Query:    "with recursive MYTABLE(j) as (select 2 union select MYTABLE.j from MYTABLE join mytable on MYTABLE.j = mytable.i) select j from MYTABLE",
+		Expected: []sql.Row{{2}},
+	},
+	{
+		// mysql is case-sensitive with CTE name
+		Query:    "with recursive MYTABLE(j) as (select 2 union select MYTABLE.j from MYTABLE join mytable on MYTABLE.j = mytable.i) select i from mytable;",
+		Expected: []sql.Row{{1}, {2}, {3}},
+	},
+	{
+		// edge case where mysql moves an orderby between scopes
+		Query:    "with a(j) as (select 1), b(i) as (select 2) (select j from a union select i from b order by 1 desc) union select j from a;",
+		Expected: []sql.Row{{2}, {1}},
+	},
+	{
+		// mysql converts boolean to int8
+		Query:    "with a(j) as (select 1 union select 2 union select 3), b(i) as (select 2 union select 3) select (3,4) in (select a.j, b.i+1 from a, b where a.j = b.i) as k group by k having k = 1;",
+		Expected: []sql.Row{{1}},
+	},
+	{
+		// mysql converts boolean to int8 and deduplicates with other 1
+		Query:    "With recursive a(x) as (select 1 union select 2 union select x in (select t1.i from mytable t1) from a) select x from a;",
+		Expected: []sql.Row{{1}, {2}},
+	},
+	// this doesn't parse in MySQL (can't use an alias in a where clause), panics in engine
+	// AVG gives the wrong result for the first row
+	{
+		Query: "SELECT json_table() FROM dual;", // syntax error
+	},
+	{
+		Query: "SELECT json_value() FROM dual;", // syntax error
+	},
 	// Null-safe and type conversion tuple comparison is not correctly
 	// implemented yet.
 	{
@@ -7703,29 +10319,12 @@ var BrokenQueries = []QueryTest{
 		Expected: []sql.Row{},
 	},
 	{
-		Query:    "SELECT 1 FROM DUAL WHERE (1, null) != (0, null)",
-		Expected: []sql.Row{},
-	},
-	{
 		Query:    "SELECT 1 FROM DUAL WHERE (0, null) = (0, null)",
 		Expected: []sql.Row{},
 	},
 	{
-		Query:    "SELECT 1 FROM DUAL WHERE ('0', 0) = (0, '0')",
-		Expected: []sql.Row{{1}},
-	},
-	{
 		Query:    "SELECT 1 FROM DUAL WHERE (null, null) = (select null, null from dual)",
 		Expected: []sql.Row{},
-	},
-	// pushdownGroupByAliases breaks queries where subquery expressions
-	// reference the outer table and an alias gets pushed to a projection
-	// below a group by node.
-	{
-		Query: "SELECT c AS i_do_not_conflict, COUNT(*), MIN((SELECT COUNT(*) FROM (SELECT 1 AS d) b WHERE b.d = a.c)) FROM (SELECT 1 AS c) a GROUP BY i_do_not_conflict;",
-	},
-	{
-		Query: "SELECT c AS c, COUNT(*), MIN((SELECT COUNT(*) FROM (SELECT 1 AS d) b WHERE b.d = a.c)) FROM (SELECT 1 AS c) a GROUP BY a.c;",
 	},
 	// TODO: support nested recursive CTEs
 	{
@@ -7768,14 +10367,87 @@ var BrokenQueries = []QueryTest{
 	},
 	// Parsers for u, U, v, V, w, W, x and X are not supported yet.
 	{
-		Query:    "STR_TO_DATE('2013 32 Tuesday', '%X %V %W')", // Tuesday of 32th week
+		Query:    "SELECT STR_TO_DATE('2013 32 Tuesday', '%X %V %W')", // Tuesday of 32th week
 		Expected: []sql.Row{{"2013-08-13"}},
 	},
 	{
-		// https://github.com/dolthub/dolt/issues/4931
-		// The current output is "0.07200000000000"
-		Query:    "select 2000.0 / 250000000.0 * (24.0 * 6.0 * 6.25 * 10.0);",
-		Expected: []sql.Row{{"0.0720000000"}},
+		// TODO:  need to properly handle datetime precision
+		Query:    `SELECT STR_TO_DATE('01,5,2013 09:30:17','%d,%m,%Y %h:%i:%s %f') - (STR_TO_DATE('01,5,2013 09:30:17','%d,%m,%Y %h:%i:%s') - INTERVAL 1 SECOND)`,
+		Expected: []sql.Row{{int64(1)}},
+	},
+	{
+		// This panics
+		// The non-recursive part of the UNION ALL returns too many rows, causing index out of bounds errors
+		// Without the join on mytable and cte, this error is caught
+		Query: `
+WITH RECURSIVE cte(i, j) AS (
+    SELECT 0, 1, 2
+    FROM mytable
+
+    UNION ALL
+    
+    SELECT *
+    FROM mytable, cte
+    WHERE cte.i = mytable.i   
+)
+SELECT *
+FROM mytable;`,
+		Expected: []sql.Row{
+			{1, "first row"},
+			{2, "second row"},
+			{3, "third row"},
+		},
+	},
+	{
+		// TODO: we do not return correct result in some cases. The method used: `GetIsUpdatableFromCreateView(cv *CreateView)`
+		Query:    "select TABLE_NAME, IS_UPDATABLE from information_schema.views where table_schema = 'mydb'",
+		Expected: []sql.Row{{"myview1", "YES"}, {"myview2", "YES"}, {"myview3", "NO"}, {"myview4", "NO"}, {"myview5", "YES"}},
+	},
+	// time to json cast is broken
+	{
+		Query: "SELECT json_type(cast(cast('2001-01-01 12:34:56.123456' as time) as json));",
+		Expected: []sql.Row{
+			{"TIME"},
+		},
+	},
+	// binary to json cast is broken
+	{
+		Query: "SELECT json_type(cast(cast('123abc' as binary) as json));",
+		Expected: []sql.Row{
+			{"BLOB"},
+		},
+	},
+	// 1e2 -> 100, so we can't tell the difference between float and integer in this case
+	{
+		Query: `SELECT json_type(json_extract('{"a": 1e2}', '$.a'));`,
+		Expected: []sql.Row{
+			{"DOUBLE"},
+		},
+	},
+	// MySQL seems to store initial type information in JSON, we don't
+	{
+		Query: `SELECT json_type(json_extract(json_object("a", cast(10 as double)), "$.a"));`,
+		Expected: []sql.Row{
+			{"DOUBLE"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract(json_object("a", cast(10 as unsigned)), "$.a"));`,
+		Expected: []sql.Row{
+			{"UNSIGNED INTEGER"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract(json_object("a", cast(10 as signed)), "$.a"));`,
+		Expected: []sql.Row{
+			{"INTEGER"},
+		},
+	},
+	{
+		Query: `SELECT json_type(json_extract(json_object("a", cast(10 as decimal)), "$.a"));`,
+		Expected: []sql.Row{
+			{"DECIMAL"},
+		},
 	},
 }
 
@@ -7880,16 +10552,16 @@ var VersionedScripts = []ScriptTest{
 			{
 				Query: "DESCRIBE myhistorytable AS OF '2019-01-02'",
 				Expected: []sql.Row{
-					{"i", "bigint", "NO", "PRI", "NULL", ""},
-					{"s", "text", "NO", "", "NULL", ""},
+					{"i", "bigint", "NO", "PRI", nil, ""},
+					{"s", "text", "NO", "", nil, ""},
 				},
 			},
 			{
 				Query: "DESCRIBE myhistorytable AS OF '2019-01-03'",
 				Expected: []sql.Row{
-					{"i", "bigint", "NO", "PRI", "NULL", ""},
-					{"s", "text", "NO", "", "NULL", ""},
-					{"c", "text", "NO", "", "NULL", ""},
+					{"i", "bigint", "NO", "PRI", nil, ""},
+					{"s", "text", "NO", "", nil, ""},
+					{"c", "text", "NO", "", nil, ""},
 				},
 			},
 		},
@@ -7899,59 +10571,67 @@ var VersionedScripts = []ScriptTest{
 var DateParseQueries = []QueryTest{
 	{
 		Query:    "SELECT STR_TO_DATE('Jan 3, 2000', '%b %e, %Y')",
-		Expected: []sql.Row{{"2000-01-03"}},
+		Expected: []sql.Row{{time.Date(2000, time.January, 3, 0, 0, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('01,5,2013', '%d,%m,%Y')",
-		Expected: []sql.Row{{"2013-05-01"}},
+		Expected: []sql.Row{{time.Date(2013, time.May, 1, 0, 0, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('May 1, 2013','%M %d,%Y')",
-		Expected: []sql.Row{{"2013-05-01"}},
+		Expected: []sql.Row{{time.Date(2013, time.May, 1, 0, 0, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('a09:30:17','a%h:%i:%s')",
-		Expected: []sql.Row{{"09:30:17"}},
+		Expected: []sql.Row{{time.Date(-1, time.November, 30, 9, 30, 17, 0, time.UTC)}},
+	},
+	{
+		Query:    "SELECT STR_TO_DATE('A09:30:17','A%h:%i:%s')",
+		Expected: []sql.Row{{time.Date(-1, time.November, 30, 9, 30, 17, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('a09:30:17','%h:%i:%s')",
 		Expected: []sql.Row{{nil}},
 	},
 	{
+		Query:    "SELECT STR_TO_DATE('A09:30:17','a%h:%i:%s')",
+		Expected: []sql.Row{{nil}},
+	},
+	{
 		Query:    "SELECT STR_TO_DATE('09:30:17a','%h:%i:%s')",
-		Expected: []sql.Row{{"09:30:17"}},
+		Expected: []sql.Row{{time.Date(-1, time.November, 30, 9, 30, 17, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('09:30:17 pm','%h:%i:%s %p')",
-		Expected: []sql.Row{{"21:30:17"}},
+		Expected: []sql.Row{{time.Date(-1, time.November, 30, 9, 30, 17, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('9','%m')",
-		Expected: []sql.Row{{"0000-09-00"}},
+		Expected: []sql.Row{{time.Date(0, time.August, 31, 0, 0, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('9','%s')",
-		Expected: []sql.Row{{"00:00:09"}},
+		Expected: []sql.Row{{time.Date(-1, time.November, 30, 0, 0, 9, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('01/02/99 314', '%m/%e/%y %f')",
-		Expected: []sql.Row{{"1999-01-02 00:00:00.314000"}},
+		Expected: []sql.Row{{time.Date(1999, time.January, 2, 0, 0, 0, 314000, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('01/02/99 0', '%m/%e/%y %f')",
-		Expected: []sql.Row{{"1999-01-02 00:00:00.000000"}},
+		Expected: []sql.Row{{time.Date(1999, time.January, 2, 0, 0, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('01/02/99 05:14:12 PM', '%m/%e/%y %r')",
-		Expected: []sql.Row{{"1999-01-02 17:14:12"}},
+		Expected: []sql.Row{{time.Date(1999, time.January, 2, 5, 14, 12, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('May 3, 10:23:00 2000', '%b %e, %H:%i:%s %Y')",
-		Expected: []sql.Row{{"2000-05-03 10:23:00"}},
+		Expected: []sql.Row{{time.Date(2000, time.May, 3, 10, 23, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('May 3, 10:23:00 PM 2000', '%b %e, %h:%i:%s %p %Y')",
-		Expected: []sql.Row{{"2000-05-03 22:23:00"}},
+		Expected: []sql.Row{{time.Date(2000, time.May, 3, 10, 23, 0, 0, time.UTC)}},
 	},
 	{
 		Query:    "SELECT STR_TO_DATE('May 3, 10:23:00 PM 2000', '%b %e, %H:%i:%s %p %Y')", // cannot use 24 hour time (%H) with AM/PM (%p)
@@ -7969,12 +10649,64 @@ var DateParseQueries = []QueryTest{
 
 type QueryErrorTest struct {
 	Query          string
-	Bindings       map[string]sql.Expression
+	Bindings       map[string]sqlparser.Expr
 	ExpectedErr    *errors.Kind
 	ExpectedErrStr string
 }
 
 var ErrorQueries = []QueryErrorTest{
+	{
+		Query:       "analyze table mytable update histogram on i using data 'unknown'",
+		ExpectedErr: planbuilder.ErrFailedToParseStats,
+	},
+	{
+		Query:       "select * from othertable join foo.othertable on foo.othertable.s2 = 'a'",
+		ExpectedErr: sql.ErrTableColumnNotFound,
+	},
+	{
+		Query:       "select * from foo.othertable join othertable on foo.othertable.s2 = 'a'",
+		ExpectedErr: sql.ErrTableColumnNotFound,
+	},
+	{
+		Query:       "select * from othertable join foo.othertable on mydb.othertable.text = 'third'",
+		ExpectedErr: sql.ErrTableColumnNotFound,
+	},
+	{
+		Query:       "select * from foo.othertable join othertable on mydb.othertable.text = 'third'",
+		ExpectedErr: sql.ErrTableColumnNotFound,
+	},
+	{
+		Query:       "select i from mytable a join mytable b on a.i = b.i",
+		ExpectedErr: sql.ErrAmbiguousColumnName,
+	},
+	{
+		Query:       "select i from mytable join mytable",
+		ExpectedErr: sql.ErrAmbiguousColumnName,
+	},
+	{
+		Query:       "select * from mytable join mytable",
+		ExpectedErr: sql.ErrDuplicateAliasOrTable,
+	},
+	{
+		Query:       "select * from (select * from othertable) mytable join mytable",
+		ExpectedErr: sql.ErrDuplicateAliasOrTable,
+	},
+	{
+		Query:       "select * from (select * from foo.othertable) mytable join mytable",
+		ExpectedErr: sql.ErrDuplicateAliasOrTable,
+	},
+	{
+		Query:       "select i from (select * from mytable a join mytable b on a.i = b.i) dt",
+		ExpectedErr: sql.ErrAmbiguousColumnName,
+	},
+	{
+		Query:       "select i from (select * from mytable join mytable) a join mytable b on a.i = b.i",
+		ExpectedErr: sql.ErrAmbiguousColumnName,
+	},
+	{
+		Query:       "select table_name from information_schema.statistics AS OF '2023-08-31' WHERE table_schema='mydb'",
+		ExpectedErr: sql.ErrAsOfNotSupported,
+	},
 	{
 		Query:       "with a(j) as (select 1), b(i) as (select 2) (select j from a union select i from b order by 1 desc) union select j from a order by 1 asc;",
 		ExpectedErr: sql.ErrConflictingExternalQuery,
@@ -8059,10 +10791,10 @@ var ErrorQueries = []QueryErrorTest{
 	{
 		// case-insensitive duplicate
 		Query:       "select * from mytable a join mytable A on a.i = A.i;",
-		ExpectedErr: sql.ErrDuplicateAliasOrTable,
+		ExpectedErr: sql.ErrAmbiguousColumnName,
 	},
 	{
-		Query:       "SELECT * FROM mytable AS t UNION SELECT * FROM mytable AS t, othertable AS t", // duplicate alias in union
+		Query:       "SELECT * FROM mytable AS t, othertable UNION SELECT * FROM mytable AS t, othertable AS t", // duplicate alias in union
 		ExpectedErr: sql.ErrDuplicateAliasOrTable,
 	},
 	{
@@ -8070,8 +10802,8 @@ var ErrorQueries = []QueryErrorTest{
 		ExpectedErr: sql.ErrDuplicateAliasOrTable,
 	},
 	{
-		Query:       `SELECT * FROM mytable WHERE s REGEXP("*main.go")`,
-		ExpectedErr: expression.ErrInvalidRegexp,
+		Query:          `SELECT * FROM mytable WHERE s REGEXP("*main.go")`,
+		ExpectedErrStr: "the given regular expression is invalid",
 	},
 	{
 		Query:       `SELECT SUBSTRING(s, 1, 10) AS sub_s, SUBSTRING(SUB_S, 2, 3) AS sub_sub_s FROM mytable`,
@@ -8104,6 +10836,14 @@ var ErrorQueries = []QueryErrorTest{
 	{
 		Query:       "SELECT i FROM myhistorytable AS OF MAX(abc)",
 		ExpectedErr: sql.ErrInvalidAsOfExpression,
+	},
+	{
+		Query:       "SELECT i FROM myhistorytable AS OF MAX(i)",
+		ExpectedErr: sql.ErrInvalidAsOfExpression,
+	},
+	{
+		Query:          "SELECT i FROM myhistorytable AS OF (SELECT 1)",
+		ExpectedErrStr: "invalid AS OF expression type",
 	},
 	{
 		Query:       "SELECT pk FROM one_pk WHERE pk > ?",
@@ -8166,17 +10906,6 @@ var ErrorQueries = []QueryErrorTest{
 		ExpectedErr: sql.ErrDatabaseNotFound,
 	},
 	{
-		Query:       `SELECT s as i, i as i from mytable order by 1`,
-		ExpectedErr: sql.ErrAmbiguousColumnInOrderBy,
-	},
-	{
-		Query: `SELECT pk as pk, nt.i  as i, nt2.i as i FROM one_pk
-						RIGHT JOIN niltable nt ON pk=nt.i
-						RIGHT JOIN niltable nt2 ON pk=nt2.i - 1
-						ORDER BY 3`,
-		ExpectedErr: sql.ErrAmbiguousColumnInOrderBy,
-	},
-	{
 		Query:       "SELECT C FROM (select i,s FROM mytable) mt (a,b) order by a desc;",
 		ExpectedErr: sql.ErrColumnNotFound,
 	},
@@ -8211,15 +10940,6 @@ var ErrorQueries = []QueryErrorTest{
 	{
 		Query:       `alter table mytable add primary key (s)`,
 		ExpectedErr: sql.ErrMultiplePrimaryKeysDefined,
-	},
-	// TODO: The following two queries should work. See https://github.com/dolthub/go-mysql-server/issues/542.
-	{
-		Query:       "SELECT SUM(i), i FROM mytable GROUP BY i ORDER BY 1+SUM(i) ASC",
-		ExpectedErr: analyzer.ErrAggregationUnsupported,
-	},
-	{
-		Query:       "SELECT SUM(i) as sum, i FROM mytable GROUP BY i ORDER BY 1+SUM(i) ASC",
-		ExpectedErr: analyzer.ErrAggregationUnsupported,
 	},
 	{
 		Query:       "select ((1, 2)) from dual",
@@ -8279,7 +10999,7 @@ var ErrorQueries = []QueryErrorTest{
 	},
 	{
 		Query:       `CREATE TABLE test (pk int, primary key(pk, noexist))`,
-		ExpectedErr: sql.ErrUnknownIndexColumn,
+		ExpectedErr: sql.ErrKeyColumnDoesNotExist,
 	},
 	{
 		Query:       `CREATE TABLE test (pk int auto_increment, pk2 int auto_increment, primary key (pk))`,
@@ -8298,20 +11018,8 @@ var ErrorQueries = []QueryErrorTest{
 		ExpectedErr: sql.ErrCteRecursionLimitExceeded,
 	},
 	{
-		Query:       "with recursive t (n) as (select (1) from dual union all select n + 1 from t where n < 1002) select sum(n) from t",
+		Query:       "with recursive t (n) as (select (1) from dual union all select n + 1 from t where n < 10002) select sum(n) from t",
 		ExpectedErr: sql.ErrCteRecursionLimitExceeded,
-	},
-	{
-		Query:       `alter table a add fulltext index idx (id)`,
-		ExpectedErr: sql.ErrUnsupportedFeature,
-	},
-	{
-		Query:       `CREATE TABLE test (pk int primary key, body text, FULLTEXT KEY idx_body (body))`,
-		ExpectedErr: sql.ErrUnsupportedFeature,
-	},
-	{
-		Query:       `CREATE FULLTEXT INDEX idx ON opening_lines(opening_line)`,
-		ExpectedErr: sql.ErrUnsupportedFeature,
 	},
 	{
 		Query:       `SELECT * FROM datetime_table where date_col >= 'not a valid date'`,
@@ -8320,11 +11028,6 @@ var ErrorQueries = []QueryErrorTest{
 	{
 		Query:       `SELECT * FROM datetime_table where datetime_col >= 'not a valid datetime'`,
 		ExpectedErr: types.ErrConvertingToTime,
-	},
-	// this query was panicing, but should be allowed and should return error when this query is called
-	{
-		Query:       `CREATE PROCEDURE proc1 (OUT out_count INT) READS SQL DATA SELECT COUNT(*) FROM mytable WHERE i = 1 AND s = 'first row' AND func1(i);`,
-		ExpectedErr: sql.ErrFunctionNotFound,
 	},
 	{
 		Query:       "CREATE TABLE table_test (id int PRIMARY KEY, c float DEFAULT rand())",
@@ -8351,28 +11054,12 @@ var ErrorQueries = []QueryErrorTest{
 		ExpectedErr: sql.ErrSyntaxError,
 	},
 	{
-		Query:       "CREATE TABLE t0 (id INT PRIMARY KEY, j JSON DEFAULT '{}');",
-		ExpectedErr: sql.ErrInvalidTextBlobColumnDefault,
-	},
-	{
-		Query:       "CREATE TABLE t0 (id INT PRIMARY KEY, g GEOMETRY DEFAULT '');",
-		ExpectedErr: sql.ErrInvalidTextBlobColumnDefault,
-	},
-	{
-		Query:       "CREATE TABLE t0 (id INT PRIMARY KEY, t TEXT DEFAULT '');",
-		ExpectedErr: sql.ErrInvalidTextBlobColumnDefault,
-	},
-	{
-		Query:       "CREATE TABLE t0 (id INT PRIMARY KEY, b BLOB DEFAULT '');",
-		ExpectedErr: sql.ErrInvalidTextBlobColumnDefault,
-	},
-	{
 		Query:       "with a as (select * from a) select * from a",
 		ExpectedErr: sql.ErrTableNotFound,
 	},
 	{
 		Query:          "with a as (select * from c), b as (select * from a), c as (select * from b) select * from a",
-		ExpectedErrStr: "table not found: a", // TODO: should be c
+		ExpectedErrStr: "table not found: c",
 	},
 	{
 		Query:       "WITH Numbers AS ( SELECT n = 1 UNION ALL SELECT n + 1 FROM Numbers WHERE n+1 <= 10) SELECT n FROM Numbers;",
@@ -8410,27 +11097,271 @@ var ErrorQueries = []QueryErrorTest{
 		Query:       "drop table myview;",
 		ExpectedErr: sql.ErrUnknownTable,
 	},
+	{
+		Query:       "select SUM(*) from dual;",
+		ExpectedErr: sql.ErrStarUnsupported,
+	},
+	{
+		Query:          "create table vb_tbl (vb varbinary(123456789));",
+		ExpectedErrStr: "length is 123456789 but max allowed is 65535",
+	},
+	{
+		// Note: cannot use SRID `1234` because it is created in another test,
+		// which affects this test to not return error
+		Query:       `SELECT ST_GEOMFROMTEXT(ST_ASWKT(POINT(1,2)), 1235)`,
+		ExpectedErr: sql.ErrNoSRID,
+	},
+	{
+		Query:       `SELECT ST_GEOMFROMTEXT(ST_ASWKT(POINT(1,2)), 4294967295)`,
+		ExpectedErr: sql.ErrNoSRID,
+	},
+	{
+		Query:       `SELECT ST_GEOMFROMTEXT(ST_ASWKT(POINT(1,2)), -1)`,
+		ExpectedErr: sql.ErrInvalidSRID,
+	},
+	{
+		Query:       `SELECT ST_GEOMFROMTEXT(ST_ASWKT(POINT(1,2)), 4294967296)`,
+		ExpectedErr: sql.ErrInvalidSRID,
+	},
+	{
+		Query: `SELECT pk, (SELECT max(pk) FROM one_pk WHERE pk < opk.pk) AS x
+						FROM one_pk opk WHERE x > 0 ORDER BY x`,
+		ExpectedErr: sql.ErrColumnNotFound,
+	},
+	{
+		Query: `SELECT pk,
+					(SELECT max(pk) FROM one_pk WHERE pk < opk.pk) AS min,
+					(SELECT min(pk) FROM one_pk WHERE pk > opk.pk) AS max
+					FROM one_pk opk
+					WHERE max > 1
+					ORDER BY max;`,
+		ExpectedErr: sql.ErrColumnNotFound,
+	},
+
+	{
+		Query:       "SELECT json_array_append() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_array_insert() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_contains() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_contains_path() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_insert() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_merge() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_merge_preserve() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_remove() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_replace() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_set() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_keys() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_length() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       `SELECT JSON_VALID()`,
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       `SELECT JSON_VALID('{"a": 1}','[1]')`,
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	// This gets an error "unable to cast "second row" of type string to int64"
+	// Should throw sql.ErrAmbiguousColumnInOrderBy
+	{
+		Query:       `SELECT s as i, i as i from mytable order by i`,
+		ExpectedErr: sql.ErrAmbiguousColumnOrAliasName,
+	},
+	{
+		Query:          "select * from mytable order by 999",
+		ExpectedErrStr: "column \"999\" could not be found in any table in scope",
+	},
+	{
+		Query:          `select cot(0)`,
+		ExpectedErrStr: "DOUBLE out of range for COT",
+	},
+	{
+		Query:       `SELECT * FROM (values row(1,2), row(1,2,3)) t`,
+		ExpectedErr: sql.ErrColValCountMismatch,
+	},
 }
 
 var BrokenErrorQueries = []QueryErrorTest{
 	{
-		Query:          "with a as (select * from c), b as (select * from a), c as (select * from b) select * from a",
-		ExpectedErrStr: "table not found: c",
+		Query:          `WITH recursive n(i) as (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i+1 <= 10 GROUP BY i HAVING i+1 <= 10 ORDER BY 1 LIMIT 5) SELECT count(i) FROM n;`,
+		ExpectedErrStr: "Not supported: 'ORDER BY over UNION in recursive Common Table Expression'",
+	},
+	{
+		Query:          "with a(j) as (select 1) select j from a union select x from xy order by x;",
+		ExpectedErrStr: "Unknown column 'x' in 'order clause'",
 	},
 	{
 		Query:       "WITH Numbers AS ( SELECT n = 1 UNION ALL SELECT n + 1 FROM Numbers WHERE n+1 <= 10) SELECT n FROM Numbers;",
 		ExpectedErr: sql.ErrTableNotFound,
+	},
+
+	// Our behavior in when sql_mode = ONLY_FULL_GROUP_BY is inconsistent with MySQL
+	// Relevant issue: https://github.com/dolthub/dolt/issues/4998
+	// Special case: If you are grouping by every field of the PK, then you can select anything
+	// Otherwise, whatever you are selecting must be in the Group By (with the exception of aggregations)
+	{
+		Query:       "SELECT col0, floor(col1) FROM tab1 GROUP by col0;",
+		ExpectedErr: analyzererrors.ErrValidationGroupBy,
+	},
+	{
+		Query:       "SELECT floor(cor0.col1) * ceil(cor0.col0) AS col2 FROM tab1 AS cor0 GROUP BY cor0.col0",
+		ExpectedErr: analyzererrors.ErrValidationGroupBy,
+	},
+	{
+		Query: "select * from two_pk group by pk1, pk2",
+		// No error
+	},
+	{
+		Query:       "select * from two_pk group by pk1",
+		ExpectedErr: analyzererrors.ErrValidationGroupBy,
+	},
+	{
+		// Grouping over functions and math expressions over PK does not count, and must appear in select
+		Query:       "select * from two_pk group by pk1 + 1, mod(pk2, 2)",
+		ExpectedErr: analyzererrors.ErrValidationGroupBy,
+	},
+	{
+		// Grouping over functions and math expressions over PK does not count, and must appear in select
+		Query: "select pk1+1 from two_pk group by pk1 + 1, mod(pk2, 2)",
+		// No error
+	},
+	{
+		// Grouping over functions and math expressions over PK does not count, and must appear in select
+		Query: "select mod(pk2, 2) from two_pk group by pk1 + 1, mod(pk2, 2)",
+		// No error
+	},
+	{
+		// Grouping over functions and math expressions over PK does not count, and must appear in select
+		Query: "select mod(pk2, 2) from two_pk group by pk1 + 1, mod(pk2, 2)",
+		// No error
+	},
+	{
+		Query: `SELECT any_value(pk), (SELECT max(pk) FROM one_pk WHERE pk < opk.pk) AS x
+						FROM one_pk opk WHERE (SELECT max(pk) FROM one_pk WHERE pk < opk.pk) > 0
+						GROUP BY (SELECT max(pk) FROM one_pk WHERE pk < opk.pk) ORDER BY x`,
+		// No error, but we get opk.pk does not exist
+	},
+	// Unimplemented JSON functions
+	{
+		Query:       "SELECT json_depth() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_merge_patch() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_overlaps() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_pretty() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_quote() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_schema_valid() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_schema_validation_report() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_search() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_storage_free() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_storage_size() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_type() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "SELECT json_valid() FROM dual;",
+		ExpectedErr: sql.ErrInvalidArgumentNumber,
+	},
+	{
+		Query:       "select * from othertable join foo.othertable on othertable.text = 'third'",
+		ExpectedErr: sql.ErrUnknownColumn,
+	},
+	{
+		Query:       "select * from foo.othertable join othertable on othertable.text = 'third'",
+		ExpectedErr: sql.ErrUnknownColumn,
+	},
+	{
+		Query:       "select * from mydb.othertable join foo.othertable on othertable.text = 'third'",
+		ExpectedErr: sql.ErrUnknownColumn,
+	},
+	{
+		Query:       "select * from foo.othertable join mydb.othertable on othertable.text = 'third'",
+		ExpectedErr: sql.ErrUnknownColumn,
 	},
 }
 
 // WriteQueryTest is a query test for INSERT, UPDATE, etc. statements. It has a query to run and a select query to
 // validate the results.
 type WriteQueryTest struct {
-	WriteQuery          string
+	// WriteQuery is the INSERT, UPDATE. etc. statement to execute
+	WriteQuery string
+	// ExpectedWriteResult is the expected result of the write query
 	ExpectedWriteResult []sql.Row
-	SelectQuery         string
-	ExpectedSelect      []sql.Row
-	Bindings            map[string]sql.Expression
+	// SelectQuery is a SELECT query to run after successfully executing the WriteQuery
+	SelectQuery string
+	// ExpectedSelect is the expected result of the SelectQuery
+	ExpectedSelect []sql.Row
+	// Bindings are the set of values to bind to the query
+	Bindings map[string]sqlparser.Expr
+	// Skip indicates whether this test should be skipped
+	Skip bool
+	// SkipServerEngine indicates whether this test should be skipped when the test is being run against a running
+	// server (as opposed to the simpler Engine-based tests)
+	SkipServerEngine bool
+	// Dialect is the supported dialect for this test, which must match the dialect of the harness if specified.
+	// The script is skipped if the dialect doesn't match.
+	Dialect string
 }
 
 // GenericErrorQueryTest is a query test that is used to assert an error occurs for some query, without specifying what
@@ -8690,20 +11621,19 @@ var VersionedViewTests = []QueryTest{
 
 	// info schema support
 	{
-		Query: "select * from information_schema.views where table_schema = 'mydb'",
+		Query: "select TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION, CHECK_OPTION, DEFINER, SECURITY_TYPE, " +
+			"CHARACTER_SET_CLIENT, COLLATION_CONNECTION from information_schema.views where table_schema = 'mydb'",
 		Expected: []sql.Row{
-			sql.NewRow("def", "mydb", "myview", "SELECT * FROM mytable", "NONE", "YES", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
-			sql.NewRow("def", "mydb", "myview1", "SELECT * FROM myhistorytable", "NONE", "YES", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
-			sql.NewRow("def", "mydb", "myview2", "SELECT * FROM myview1 WHERE i = 1", "NONE", "YES", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
-			sql.NewRow("def", "mydb", "myview3", "SELECT i from myview1 union select s from myhistorytable", "NONE", "YES", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
-			sql.NewRow("def", "mydb", "myview4", "SELECT * FROM myhistorytable where i in (select distinct cast(RIGHT(s, 1) as signed) from myhistorytable)", "NONE", "NO", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
-			sql.NewRow("def", "mydb", "myview5", "SELECT * FROM (select * from myhistorytable where i in (select distinct cast(RIGHT(s, 1) as signed))) as sq", "NONE", "NO", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
+			sql.NewRow("def", "mydb", "myview1", "SELECT * FROM myhistorytable", "NONE", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
+			sql.NewRow("def", "mydb", "myview2", "SELECT * FROM myview1 WHERE i = 1", "NONE", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
+			sql.NewRow("def", "mydb", "myview3", "SELECT i from myview1 union select s from myhistorytable", "NONE", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
+			sql.NewRow("def", "mydb", "myview4", "SELECT * FROM myhistorytable where i in (select distinct cast(RIGHT(s, 1) as signed) from myhistorytable)", "NONE", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
+			sql.NewRow("def", "mydb", "myview5", "SELECT * FROM (select * from myhistorytable where i in (select distinct cast(RIGHT(s, 1) as signed))) as sq", "NONE", "root@localhost", "DEFINER", "utf8mb4", "utf8mb4_0900_bin"),
 		},
 	},
 	{
 		Query: "select table_name from information_schema.tables where table_schema = 'mydb' and table_type = 'VIEW' order by 1",
 		Expected: []sql.Row{
-			sql.NewRow("myview"),
 			sql.NewRow("myview1"),
 			sql.NewRow("myview2"),
 			sql.NewRow("myview3"),
@@ -8755,1046 +11685,10 @@ var ShowTableStatusQueries = []QueryTest{
 	},
 }
 
-var IndexQueries = []ScriptTest{
-	{
-		Name: "unique key violation prevents insert",
-		SetUpScript: []string{
-			"create table users (id varchar(26) primary key, namespace varchar(50), name varchar(50));",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query: "create unique index namespace__name on users (namespace, name)",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 0}},
-				},
-			},
-			{
-				Query: "show create table users",
-				Expected: []sql.Row{
-					{"users", "CREATE TABLE `users` (\n  `id` varchar(26) NOT NULL,\n  `namespace` varchar(50),\n  `name` varchar(50),\n  PRIMARY KEY (`id`),\n  UNIQUE KEY `namespace__name` (`namespace`,`name`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"},
-				},
-			},
-			{
-				Query: "insert into users values ('user1', 'namespace1', 'name1')",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 1}},
-				},
-			},
-			{
-				Query:       "insert into users values ('user2', 'namespace1', 'name1')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-		},
-	},
-	{
-		Name: "unique key duplicate key update",
-		SetUpScript: []string{
-			"CREATE TABLE auniquetable (pk int primary key, uk int unique key, i int);",
-			"INSERT INTO auniquetable VALUES(0,0,0);",
-			"INSERT INTO auniquetable (pk,uk) VALUES(1,0) on duplicate key update i = 99;",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query: "SELECT pk, uk, i from auniquetable",
-				Expected: []sql.Row{
-					{0, 0, 99},
-				},
-			},
-		},
-	},
-	{
-		Name: "non-unique indexes on keyless tables",
-		SetUpScript: []string{
-			"create table t (i int, j int, index(i))",
-			"insert into t values (0, 100), (0, 200), (1, 100), (1, 200), (2, 100), (2, 200)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query: "select i, j from t where i = 0 order by i, j",
-				Expected: []sql.Row{
-					{0, 100},
-					{0, 200},
-				},
-			},
-			{
-				Query: "select i, j from t where i = 1 order by i, j",
-				Expected: []sql.Row{
-					{1, 100},
-					{1, 200},
-				},
-			},
-			{
-				Query: "select i, j from t where i > 0 order by i, j",
-				Expected: []sql.Row{
-					{1, 100},
-					{1, 200},
-					{2, 100},
-					{2, 200},
-				},
-			},
-			{
-				Query: "select i, j from t where i > 0 and i < 2 order by i, j",
-				Expected: []sql.Row{
-					{1, 100},
-					{1, 200},
-				},
-			},
-		},
-	},
-	{
-		Name: "more non-unique indexes on keyless tables",
-		SetUpScript: []string{
-			"create table t (i int, j int, k int, index(i, j))",
-			"insert into t values (0, 0, 123), (0, 1, 456), (1, 0, 123), (1, 1, 456), (2, 0, 123), (2, 1, 456)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query: "select i, j, k from t where i = 0 order by i, j, k",
-				Expected: []sql.Row{
-					{0, 0, 123},
-					{0, 1, 456},
-				},
-			},
-			{
-				Query: "select i, j, k from t where i = 0 and j = 0 order by i, j, k",
-				Expected: []sql.Row{
-					{0, 0, 123},
-				},
-			},
-			{
-				Query: "select i, j, k from t where i = 1 and (j = 0 or j = 1) order by i, j, k",
-				Expected: []sql.Row{
-					{1, 0, 123},
-					{1, 1, 456},
-				},
-			},
-			{
-				Query: "select i, j, k from t where i > 0 and j > 0 order by i, j, k",
-				Expected: []sql.Row{
-					{1, 1, 456},
-					{2, 1, 456},
-				},
-			},
-			{
-				Query: "select i, j, k from t where i > 0 and i < 2 order by i, j, k",
-				Expected: []sql.Row{
-					{1, 0, 123},
-					{1, 1, 456},
-				},
-			},
-		},
-	},
-}
-
-var IndexPrefixQueries = []ScriptTest{
-	{
-		Name: "int prefix",
-		SetUpScript: []string{
-			"create table t (i int)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (i(10))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "alter table t add index (i(10))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table c_tbl (i int, primary key (i(10)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table c_tbl (i int primary key, j int, index (j(10)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "float prefix",
-		SetUpScript: []string{
-			"create table t (f float)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (f(10))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "alter table t add index (f(10))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table c_tbl (f float, primary key (f(10)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table c_tbl (i int primary key, f float, index (f(10)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "string index prefix errors",
-		SetUpScript: []string{
-			"create table v_tbl (v varchar(10))",
-			"create table c_tbl (c char(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table v_tbl add primary key (v(0))",
-				ExpectedErr: sql.ErrKeyZero,
-			},
-			{
-				Query:       "alter table v_tbl add primary key (v(11))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "alter table v_tbl add index (v(0))",
-				ExpectedErr: sql.ErrKeyZero,
-			},
-			{
-				Query:       "alter table v_tbl add index (v(11))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "alter table c_tbl add primary key (c(11))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "alter table c_tbl add index (c(11))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table t (v varchar(10), primary key(v(0)))",
-				ExpectedErr: sql.ErrKeyZero,
-			},
-			{
-				Query:       "create table t (v varchar(10), primary key(v(11)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table t (v varchar(10), index(v(11)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table t (c char(10), primary key(c(11)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-			{
-				Query:       "create table t (c char(10), index(c(11)))",
-				ExpectedErr: sql.ErrInvalidIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "varchar primary key prefix",
-		SetUpScript: []string{
-			"create table t (v varchar(100))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (v(10))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-			{
-				Query:       "create table v_tbl (v varchar(100), primary key (v(10)))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "varchar keyed secondary index prefix",
-		SetUpScript: []string{
-			"create table t (i int primary key, v varchar(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (v(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `v` varchar(10),\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `v` (`v`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values (0, 'aa'), (1, 'ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "insert into t values (0, 'aa'), (1, 'bb'), (2, 'cc')",
-				Expected: []sql.Row{{types.NewOkResult(3)}},
-			},
-			{
-				Query:    "select * from t where v = 'a'",
-				Expected: []sql.Row{},
-			},
-			{
-				Query: "select * from t where v = 'aa'",
-				Expected: []sql.Row{
-					{0, "aa"},
-				},
-			},
-			{
-				Query:    "create table v_tbl (i int primary key, v varchar(100), index (v(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table v_tbl",
-				Expected: []sql.Row{{"v_tbl", "CREATE TABLE `v_tbl` (\n  `i` int NOT NULL,\n  `v` varchar(100),\n  PRIMARY KEY (`i`),\n  KEY `v` (`v`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "varchar keyless secondary index prefix",
-		SetUpScript: []string{
-			"create table t (v varchar(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (v(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `v` varchar(10),\n  UNIQUE KEY `v` (`v`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values ('aa'), ('ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table v_tbl (v varchar(100), index (v(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table v_tbl",
-				Expected: []sql.Row{{"v_tbl", "CREATE TABLE `v_tbl` (\n  `v` varchar(100),\n  KEY `v` (`v`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "char primary key prefix",
-		SetUpScript: []string{
-			"create table t (c char(100))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (c(10))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-			{
-				Query:       "create table c_tbl (c char(100), primary key (c(10)))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "char keyed secondary index prefix",
-		SetUpScript: []string{
-			"create table t (i int primary key, c char(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (c(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `c` char(10),\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `c` (`c`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values (0, 'aa'), (1, 'ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table c_tbl (i int primary key, c varchar(100), index (c(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table c_tbl",
-				Expected: []sql.Row{{"c_tbl", "CREATE TABLE `c_tbl` (\n  `i` int NOT NULL,\n  `c` varchar(100),\n  PRIMARY KEY (`i`),\n  KEY `c` (`c`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "char keyless secondary index prefix",
-		SetUpScript: []string{
-			"create table t (c char(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (c(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `c` char(10),\n  UNIQUE KEY `c` (`c`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values ('aa'), ('ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table c_tbl (c char(100), index (c(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table c_tbl",
-				Expected: []sql.Row{{"c_tbl", "CREATE TABLE `c_tbl` (\n  `c` char(100),\n  KEY `c` (`c`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "varbinary primary key prefix",
-		SetUpScript: []string{
-			"create table t (v varbinary(100))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (v(10))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-			{
-				Query:       "create table v_tbl (v varbinary(100), primary key (v(10)))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "varbinary keyed secondary index prefix",
-		SetUpScript: []string{
-			"create table t (i int primary key, v varbinary(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (v(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `v` varbinary(10),\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `v` (`v`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values (0, 'aa'), (1, 'ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table v_tbl (i int primary key, v varbinary(100), index (v(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table v_tbl",
-				Expected: []sql.Row{{"v_tbl", "CREATE TABLE `v_tbl` (\n  `i` int NOT NULL,\n  `v` varbinary(100),\n  PRIMARY KEY (`i`),\n  KEY `v` (`v`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "varbinary keyless secondary index prefix",
-		SetUpScript: []string{
-			"create table t (v varbinary(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (v(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `v` varbinary(10),\n  UNIQUE KEY `v` (`v`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values ('aa'), ('ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table v_tbl (v varbinary(100), index (v(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table v_tbl",
-				Expected: []sql.Row{{"v_tbl", "CREATE TABLE `v_tbl` (\n  `v` varbinary(100),\n  KEY `v` (`v`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "binary primary key prefix",
-		SetUpScript: []string{
-			"create table t (b binary(100))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (b(10))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-			{
-				Query:       "create table b_tbl (b binary(100), primary key (b(10)))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "binary keyed secondary index prefix",
-		SetUpScript: []string{
-			"create table t (i int primary key, b binary(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (b(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `b` binary(10),\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `b` (`b`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values (0, 'aa'), (1, 'ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table b_tbl (i int primary key, b binary(100), index (b(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table b_tbl",
-				Expected: []sql.Row{{"b_tbl", "CREATE TABLE `b_tbl` (\n  `i` int NOT NULL,\n  `b` binary(100),\n  PRIMARY KEY (`i`),\n  KEY `b` (`b`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "binary keyless secondary index prefix",
-		SetUpScript: []string{
-			"create table t (b binary(10))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (b(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `b` binary(10),\n  UNIQUE KEY `b` (`b`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values ('aa'), ('ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table b_tbl (b binary(100), index (b(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table b_tbl",
-				Expected: []sql.Row{{"b_tbl", "CREATE TABLE `b_tbl` (\n  `b` binary(100),\n  KEY `b` (`b`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "blob primary key prefix",
-		SetUpScript: []string{
-			"create table t (b blob)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (b(10))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-			{
-				Query:       "create table b_tbl (b blob, primary key (b(10)))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "blob keyed secondary index prefix",
-		SetUpScript: []string{
-			"create table t (i int primary key, b blob)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (b(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `b` blob,\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `b` (`b`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values (0, 'aa'), (1, 'ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table b_tbl (i int primary key, b blob, index (b(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table b_tbl",
-				Expected: []sql.Row{{"b_tbl", "CREATE TABLE `b_tbl` (\n  `i` int NOT NULL,\n  `b` blob,\n  PRIMARY KEY (`i`),\n  KEY `b` (`b`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "blob keyless secondary index prefix",
-		SetUpScript: []string{
-			"create table t (b blob)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (b(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `b` blob,\n  UNIQUE KEY `b` (`b`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values ('aa'), ('ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table b_tbl (b blob, index (b(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table b_tbl",
-				Expected: []sql.Row{{"b_tbl", "CREATE TABLE `b_tbl` (\n  `b` blob,\n  KEY `b` (`b`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "text primary key prefix",
-		SetUpScript: []string{
-			"create table t (t text)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:       "alter table t add primary key (t(10))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-			{
-				Query:       "create table b_tbl (t text, primary key (t(10)))",
-				ExpectedErr: sql.ErrUnsupportedIndexPrefix,
-			},
-		},
-	},
-	{
-		Name: "text keyed secondary index prefix",
-		SetUpScript: []string{
-			"create table t (i int primary key, t text)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (t(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `t` text,\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `t` (`t`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values (0, 'aa'), (1, 'ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table t_tbl (i int primary key, t text, index (t(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t_tbl",
-				Expected: []sql.Row{{"t_tbl", "CREATE TABLE `t_tbl` (\n  `i` int NOT NULL,\n  `t` text,\n  PRIMARY KEY (`i`),\n  KEY `t` (`t`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "text keyless secondary index prefix",
-		SetUpScript: []string{
-			"create table t (t text)",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "alter table t add unique index (t(1))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `t` text,\n  UNIQUE KEY `t` (`t`(1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:       "insert into t values ('aa'), ('ab')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:    "create table t_tbl (t text, index (t(10)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "show create table t_tbl",
-				Expected: []sql.Row{{"t_tbl", "CREATE TABLE `t_tbl` (\n  `t` text,\n  KEY `t` (`t`(10))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-		},
-	},
-	{
-		Name: "inline secondary indexes",
-		SetUpScript: []string{
-			"create table t (i int primary key, v1 varchar(10), v2 varchar(10), unique index (v1(3),v2(5)))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `v1` varchar(10),\n  `v2` varchar(10),\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `v1v2` (`v1`(3),`v2`(5))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:    "insert into t values (0, 'a', 'a'), (1, 'ab','ab'), (2, 'abc', 'abc'), (3, 'abcde', 'abcde')",
-				Expected: []sql.Row{{types.NewOkResult(4)}},
-			},
-			{
-				Query:       "insert into t values (99, 'abc', 'abcde')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:       "insert into t values (99, 'abc123', 'abcde123')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query: "select * from t where v1 = 'a'",
-				Expected: []sql.Row{
-					{0, "a", "a"},
-				},
-			},
-			{
-				Query: "select * from t where v1 = 'abc'",
-				Expected: []sql.Row{
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query:    "select * from t where v1 = 'abcd'",
-				Expected: []sql.Row{},
-			},
-			{
-				Query: "select * from t where v1 > 'a' and v1 < 'abcde'",
-				Expected: []sql.Row{
-					{1, "ab", "ab"},
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query: "select * from t where v1 > 'a' and v2 < 'abcde'",
-				Expected: []sql.Row{
-					{1, "ab", "ab"},
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query: "update t set v1 = concat(v1, 'z') where v1 >= 'a'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4, InsertID: 0, Info: plan.UpdateInfo{Matched: 4, Updated: 4}}},
-				},
-			},
-			{
-				Query: "select * from t",
-				Expected: []sql.Row{
-					{0, "az", "a"},
-					{1, "abz", "ab"},
-					{2, "abcz", "abc"},
-					{3, "abcdez", "abcde"},
-				},
-			},
-			{
-				Query: "delete from t where v1 >= 'a'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4}},
-				},
-			},
-			{
-				Query:    "select * from t",
-				Expected: []sql.Row{},
-			},
-		},
-	},
-	{
-		Name: "inline secondary indexes keyless",
-		SetUpScript: []string{
-			"create table t (v1 varchar(10), v2 varchar(10), unique index (v1(3),v2(5)))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `v1` varchar(10),\n  `v2` varchar(10),\n  UNIQUE KEY `v1v2` (`v1`(3),`v2`(5))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:    "insert into t values ('a', 'a'), ('ab','ab'), ('abc', 'abc'), ('abcde', 'abcde')",
-				Expected: []sql.Row{{types.NewOkResult(4)}},
-			},
-			{
-				Query:       "insert into t values ('abc', 'abcde')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:       "insert into t values ('abc123', 'abcde123')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query: "select * from t where v1 = 'a'",
-				Expected: []sql.Row{
-					{"a", "a"},
-				},
-			},
-			{
-				Query: "select * from t where v1 = 'abc'",
-				Expected: []sql.Row{
-					{"abc", "abc"},
-				},
-			},
-			{
-				Query:    "select * from t where v1 = 'abcd'",
-				Expected: []sql.Row{},
-			},
-			{
-				Query: "select * from t where v1 > 'a' and v1 < 'abcde'",
-				Expected: []sql.Row{
-					{"ab", "ab"},
-					{"abc", "abc"},
-				},
-			},
-			{
-				Query: "select * from t where v1 > 'a' and v2 < 'abcde'",
-				Expected: []sql.Row{
-					{"ab", "ab"},
-					{"abc", "abc"},
-				},
-			},
-			{
-				Query: "update t set v1 = concat(v1, 'z') where v1 >= 'a'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4, InsertID: 0, Info: plan.UpdateInfo{Matched: 4, Updated: 4}}},
-				},
-			},
-			{
-				Query: "select * from t",
-				Expected: []sql.Row{
-					{"az", "a"},
-					{"abz", "ab"},
-					{"abcz", "abc"},
-					{"abcdez", "abcde"},
-				},
-			},
-			{
-				Query: "delete from t where v1 >= 'a'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4}},
-				},
-			},
-			{
-				Query:    "select * from t",
-				Expected: []sql.Row{},
-			},
-		},
-	},
-	// TODO (james): collations do not work for in-memory tables; this test is in dolt_queries.go
-	{
-		Name: "inline secondary indexes with collation",
-		SetUpScript: []string{
-			"create table t (i int primary key, v1 varchar(10), v2 varchar(10), unique index (v1(3),v2(5))) collate utf8mb4_0900_ai_ci",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `v1` varchar(10) COLLATE utf8mb4_0900_ai_ci,\n  `v2` varchar(10) COLLATE utf8mb4_0900_ai_ci,\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `v1v2` (`v1`(3),`v2`(5))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"}},
-			},
-			{
-				Query:    "insert into t values (0, 'a', 'a'), (1, 'ab','ab'), (2, 'abc', 'abc'), (3, 'abcde', 'abcde')",
-				Expected: []sql.Row{{types.NewOkResult(4)}},
-			},
-			{
-				Skip:        true,
-				Query:       "insert into t values (99, 'ABC', 'ABCDE')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Skip:        true,
-				Query:       "insert into t values (99, 'ABC123', 'ABCDE123')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Skip:  true,
-				Query: "select * from t where v1 = 'A'",
-				Expected: []sql.Row{
-					{0, "a", "a"},
-				},
-			},
-			{
-				Skip:  true,
-				Query: "select * from t where v1 = 'ABC'",
-				Expected: []sql.Row{
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query:    "select * from t where v1 = 'ABCD'",
-				Expected: []sql.Row{},
-			},
-			{
-				Skip:  true,
-				Query: "select * from t where v1 > 'A' and v1 < 'ABCDE'",
-				Expected: []sql.Row{
-					{1, "ab", "ab"},
-				},
-			},
-			{
-				Query: "select * from t where v1 > 'A' and v2 < 'ABCDE'",
-				Expected: []sql.Row{
-					{1, "ab", "ab"},
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Skip:  true,
-				Query: "update t set v1 = concat(v1, 'Z') where v1 >= 'A'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4, InsertID: 0, Info: plan.UpdateInfo{Matched: 4, Updated: 4}}},
-				},
-			},
-			{
-				Skip:  true,
-				Query: "select * from t",
-				Expected: []sql.Row{
-					{0, "aZ", "a"},
-					{1, "abZ", "ab"},
-					{2, "abcZ", "abc"},
-					{3, "abcdeZ", "abcde"},
-				},
-			},
-			{
-				Skip:  true,
-				Query: "delete from t where v1 >= 'A'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4}},
-				},
-			},
-			{
-				Skip:     true,
-				Query:    "select * from t",
-				Expected: []sql.Row{},
-			},
-		},
-	},
-	{
-		Name: "referenced secondary indexes",
-		SetUpScript: []string{
-			"create table t (i int primary key, v1 text, v2 text, unique index (v1(3),v2(5)))",
-		},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "show create table t",
-				Expected: []sql.Row{{"t", "CREATE TABLE `t` (\n  `i` int NOT NULL,\n  `v1` text,\n  `v2` text,\n  PRIMARY KEY (`i`),\n  UNIQUE KEY `v1v2` (`v1`(3),`v2`(5))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"}},
-			},
-			{
-				Query:    "insert into t values (0, 'a', 'a'), (1, 'ab','ab'), (2, 'abc', 'abc'), (3, 'abcde', 'abcde')",
-				Expected: []sql.Row{{types.NewOkResult(4)}},
-			},
-			{
-				Query:       "insert into t values (99, 'abc', 'abcde')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query:       "insert into t values (99, 'abc123', 'abcde123')",
-				ExpectedErr: sql.ErrUniqueKeyViolation,
-			},
-			{
-				Query: "select * from t where v1 = 'a'",
-				Expected: []sql.Row{
-					{0, "a", "a"},
-				},
-			},
-			{
-				Query: "select * from t where v1 = 'abc'",
-				Expected: []sql.Row{
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query:    "select * from t where v1 = 'abcd'",
-				Expected: []sql.Row{},
-			},
-			{
-				Query: "select * from t where v1 > 'a' and v1 < 'abcde'",
-				Expected: []sql.Row{
-					{1, "ab", "ab"},
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query: "select * from t where v1 > 'a' and v2 < 'abcde'",
-				Expected: []sql.Row{
-					{1, "ab", "ab"},
-					{2, "abc", "abc"},
-				},
-			},
-			{
-				Query: "update t set v1 = concat(v1, 'z') where v1 >= 'a'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4, InsertID: 0, Info: plan.UpdateInfo{Matched: 4, Updated: 4}}},
-				},
-			},
-			{
-				Query: "select * from t",
-				Expected: []sql.Row{
-					{0, "az", "a"},
-					{1, "abz", "ab"},
-					{2, "abcz", "abc"},
-					{3, "abcdez", "abcde"},
-				},
-			},
-			{
-				Query: "delete from t where v1 >= 'a'",
-				Expected: []sql.Row{
-					{types.OkResult{RowsAffected: 4}},
-				},
-			},
-			{
-				Query:    "select * from t",
-				Expected: []sql.Row{},
-			},
-		},
-	},
-	{
-		Name:        "test prefix limits",
-		SetUpScript: []string{},
-		Assertions: []ScriptTestAssertion{
-			{
-				Query:    "create table varchar_limit(c varchar(10000), index (c(768)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "create table text_limit(c text, index (c(768)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "create table varbinary_limit(c varbinary(10000), index (c(3072)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:    "create table blob_limit(c blob, index (c(3072)))",
-				Expected: []sql.Row{{types.NewOkResult(0)}},
-			},
-			{
-				Query:       "create table bad(c varchar(10000), index (c(769)))",
-				ExpectedErr: sql.ErrKeyTooLong,
-			},
-			{
-				Query:       "create table bad(c text, index (c(769)))",
-				ExpectedErr: sql.ErrKeyTooLong,
-			},
-			{
-				Query:       "create table bad(c varbinary(10000), index (c(3073)))",
-				ExpectedErr: sql.ErrKeyTooLong,
-			},
-			{
-				Query:       "create table bad(c blob, index (c(3073)))",
-				ExpectedErr: sql.ErrKeyTooLong,
-			},
-		},
-	},
+func MustParseTime(layout, value string) time.Time {
+	parsed, err := time.Parse(layout, value)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }

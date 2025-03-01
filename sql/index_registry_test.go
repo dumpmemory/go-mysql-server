@@ -426,6 +426,10 @@ type dummyIdx struct {
 	table    string
 }
 
+func (i dummyIdx) CanSupportOrderBy(Expression) bool {
+	return false
+}
+
 var _ DriverIndex = (*dummyIdx)(nil)
 
 func (i dummyIdx) CanSupport(r ...Range) bool {
@@ -445,6 +449,8 @@ func (i dummyIdx) Table() string           { return i.table }
 func (i dummyIdx) Driver() string          { return "dummy" }
 func (i dummyIdx) IsUnique() bool          { return false }
 func (i dummyIdx) IsSpatial() bool         { return false }
+func (i dummyIdx) IsFullText() bool        { return false }
+func (i dummyIdx) IsVector() bool          { return false }
 func (i dummyIdx) Comment() string         { return "" }
 func (i dummyIdx) IsGenerated() bool       { return false }
 func (i dummyIdx) IndexType() string       { return "BTREE" }

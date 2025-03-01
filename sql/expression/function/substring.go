@@ -30,9 +30,9 @@ import (
 // s. That is, "á"[0:1] does not return a partial unicode glyph, but "á"
 // itself.
 type Substring struct {
-	str   sql.Expression
-	start sql.Expression
-	len   sql.Expression
+	Str   sql.Expression
+	Start sql.Expression
+	Len   sql.Expression
 }
 
 var _ sql.FunctionExpression = (*Substring)(nil)
@@ -68,10 +68,10 @@ func (s *Substring) Description() string {
 
 // Children implements the Expression interface.
 func (s *Substring) Children() []sql.Expression {
-	if s.len == nil {
-		return []sql.Expression{s.str, s.start}
+	if s.Len == nil {
+		return []sql.Expression{s.Str, s.Start}
 	}
-	return []sql.Expression{s.str, s.start, s.len}
+	return []sql.Expression{s.Str, s.Start, s.Len}
 }
 
 // Eval implements the Expression interface.
@@ -79,7 +79,7 @@ func (s *Substring) Eval(
 	ctx *sql.Context,
 	row sql.Row,
 ) (interface{}, error) {
-	str, err := s.str.Eval(ctx, row)
+	str, err := s.Str.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (s *Substring) Eval(
 		return nil, sql.ErrInvalidType.New(reflect.TypeOf(str).String())
 	}
 
-	start, err := s.start.Eval(ctx, row)
+	start, err := s.Start.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -105,15 +105,15 @@ func (s *Substring) Eval(
 		return nil, nil
 	}
 
-	start, err = types.Int64.Convert(start)
+	start, _, err = types.Int64.Convert(start)
 	if err != nil {
 		return nil, err
 	}
 
 	var length int64
 	runeCount := int64(len(text))
-	if s.len != nil {
-		len, err := s.len.Eval(ctx, row)
+	if s.Len != nil {
+		len, err := s.Len.Eval(ctx, row)
 		if err != nil {
 			return nil, err
 		}
@@ -122,7 +122,7 @@ func (s *Substring) Eval(
 			return nil, nil
 		}
 
-		len, err = types.Int64.Convert(len)
+		len, _, err = types.Int64.Convert(len)
 		if err != nil {
 			return nil, err
 		}
@@ -152,27 +152,27 @@ func (s *Substring) Eval(
 
 // IsNullable implements the Expression interface.
 func (s *Substring) IsNullable() bool {
-	return s.str.IsNullable() || s.start.IsNullable() || (s.len != nil && s.len.IsNullable())
+	return s.Str.IsNullable() || s.Start.IsNullable() || (s.Len != nil && s.Len.IsNullable())
 }
 
 func (s *Substring) String() string {
-	if s.len == nil {
-		return fmt.Sprintf("SUBSTRING(%s, %s)", s.str, s.start)
+	if s.Len == nil {
+		return fmt.Sprintf("SUBSTRING(%s, %s)", s.Str, s.Start)
 	}
-	return fmt.Sprintf("SUBSTRING(%s, %s, %s)", s.str, s.start, s.len)
+	return fmt.Sprintf("SUBSTRING(%s, %s, %s)", s.Str, s.Start, s.Len)
 }
 
 // Resolved implements the Expression interface.
 func (s *Substring) Resolved() bool {
-	return s.start.Resolved() && s.str.Resolved() && (s.len == nil || s.len.Resolved())
+	return s.Start.Resolved() && s.Str.Resolved() && (s.Len == nil || s.Len.Resolved())
 }
 
 // Type implements the Expression interface.
-func (s *Substring) Type() sql.Type { return s.str.Type() }
+func (s *Substring) Type() sql.Type { return s.Str.Type() }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (s *Substring) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
-	return sql.GetCoercibility(ctx, s.str)
+	return sql.GetCoercibility(ctx, s.Str)
 }
 
 // WithChildren implements the Expression interface.
@@ -219,7 +219,7 @@ func (s *SubstringIndex) Eval(ctx *sql.Context, row sql.Row) (interface{}, error
 	if ex == nil || err != nil {
 		return nil, err
 	}
-	ex, err = types.LongText.Convert(ex)
+	ex, _, err = types.LongText.Convert(ex)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,7 @@ func (s *SubstringIndex) Eval(ctx *sql.Context, row sql.Row) (interface{}, error
 	if ex == nil || err != nil {
 		return nil, err
 	}
-	ex, err = types.LongText.Convert(ex)
+	ex, _, err = types.LongText.Convert(ex)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +245,7 @@ func (s *SubstringIndex) Eval(ctx *sql.Context, row sql.Row) (interface{}, error
 	if ex == nil || err != nil {
 		return nil, err
 	}
-	ex, err = types.Int64.Convert(ex)
+	ex, _, err = types.Int64.Convert(ex)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +368,7 @@ func (l Left) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	len, err = types.Int64.Convert(len)
+	len, _, err = types.Int64.Convert(len)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +474,7 @@ func (r Right) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	len, err = types.Int64.Convert(len)
+	len, _, err = types.Int64.Convert(len)
 	if err != nil {
 		return nil, err
 	}

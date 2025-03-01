@@ -16,6 +16,7 @@ package plan
 
 import (
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/mysql_db"
 	"github.com/dolthub/go-mysql-server/sql/transform"
 )
 
@@ -29,7 +30,7 @@ func IsBinary(node sql.Node) bool {
 	return len(node.Children()) == 2
 }
 
-// NillaryNode is a node with no children. This is a common WithChildren implementation for all nodes that have none.
+// NillaryWithChildren is a node with no children. This is a common WithChildren implementation for all nodes that have none.
 func NillaryWithChildren(node sql.Node, children ...sql.Node) (sql.Node, error) {
 	if len(children) != 0 {
 		return nil, sql.ErrInvalidChildrenNumber.New(node, len(children), 0)
@@ -94,19 +95,35 @@ type BlockRowIter interface {
 	Schema() sql.Schema
 }
 
-// nodeRepresentsSelect attempts to walk a sql.Node to determine if it represents a SELECT statement.
-func nodeRepresentsSelect(s sql.Node) bool {
+// NodeRepresentsSelect attempts to walk a sql.Node to determine if it represents a SELECT statement.
+func NodeRepresentsSelect(s sql.Node) bool {
 	if s == nil {
 		return false
 	}
+
+	// Special case for calling procedures that call other procedures.
+	switch node := s.(type) {
+	case *Call:
+		return NodeRepresentsSelect(node.Procedure)
+	case *Procedure:
+		return NodeRepresentsSelect(node.Body)
+	case *Block:
+		for _, stmt := range node.statements {
+			if NodeRepresentsSelect(stmt) {
+				return true
+			}
+		}
+		return false
+	}
+
 	isSelect := false
-	// All SELECT statements, including those that do not specify a table (using "dual"), have a ResolvedTable.
+	// All SELECT statements, including those that do not specify a table (using "dual"), have a TableNode.
 	transform.Inspect(s, func(node sql.Node) bool {
 		switch node.(type) {
 		case *AlterAutoIncrement, *AlterIndex, *CreateForeignKey, *CreateIndex, *CreateTable, *CreateTrigger,
 			*DeleteFrom, *DropForeignKey, *InsertInto, *ShowCreateTable, *ShowIndexes, *Truncate, *Update, *Into:
 			return false
-		case *ResolvedTable, *ProcedureResolvedTable:
+		case sql.Table:
 			isSelect = true
 			return false
 		default:
@@ -130,8 +147,8 @@ func getTableName(nodeToSearch sql.Node) string {
 				nodeStack = append(nodeStack, n.UnaryNode.Child)
 				continue
 			}
-		case *ResolvedTable:
-			return n.Table.Name()
+		case sql.TableNode:
+			return n.UnderlyingTable().Name()
 		case *UnresolvedTable:
 			return n.name
 		case *IndexedTableAccess:
@@ -158,13 +175,30 @@ func GetDatabaseName(nodeToSearch sql.Node) string {
 		case sql.Databaser:
 			return n.Database().Name()
 		case *ResolvedTable:
-			return n.Database.Name()
+			return n.SqlDatabase.Name()
 		case *UnresolvedTable:
-			return n.Database()
+			return n.Database().Name()
 		case *IndexedTableAccess:
 			return n.Database().Name()
 		}
 		nodeStack = append(nodeStack, node.Children()...)
 	}
 	return ""
+}
+
+// CheckPrivilegeNameForDatabase returns the name of the database to check privileges for, which may not be the result
+// of db.Name()
+func CheckPrivilegeNameForDatabase(db sql.Database) string {
+	if db == nil {
+		return ""
+	}
+
+	checkDbName := db.Name()
+	if pdb, ok := db.(mysql_db.PrivilegedDatabase); ok {
+		db = pdb.Unwrap()
+	}
+	if adb, ok := db.(sql.AliasedDatabase); ok {
+		checkDbName = adb.AliasedName()
+	}
+	return checkDbName
 }

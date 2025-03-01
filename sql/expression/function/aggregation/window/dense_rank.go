@@ -25,6 +25,7 @@ import (
 type DenseRank struct {
 	window *sql.WindowDefinition
 	pos    int
+	id     sql.ColumnId
 }
 
 var _ sql.FunctionExpression = (*DenseRank)(nil)
@@ -34,6 +35,18 @@ var _ sql.CollationCoercible = (*DenseRank)(nil)
 
 func NewDenseRank() sql.Expression {
 	return &DenseRank{}
+}
+
+// Id implements sql.IdExpression
+func (p *DenseRank) Id() sql.ColumnId {
+	return p.id
+}
+
+// WithId implements sql.IdExpression
+func (p *DenseRank) WithId(id sql.ColumnId) sql.IdExpression {
+	ret := *p
+	ret.id = id
+	return &ret
 }
 
 // Description implements sql.FunctionExpression
@@ -92,7 +105,7 @@ func (p *DenseRank) IsNullable() bool {
 
 // Eval implements sql.Expression
 func (p *DenseRank) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	panic("eval called on window function")
+	return nil, sql.ErrWindowUnsupported.New(p.FunctionName())
 }
 
 // Children implements sql.Expression
@@ -107,14 +120,14 @@ func (p *DenseRank) WithChildren(children ...sql.Expression) (sql.Expression, er
 		return nil, err
 	}
 
-	return p.WithWindow(window)
+	return p.WithWindow(window), nil
 }
 
 // WithWindow implements sql.WindowAggregation
-func (p *DenseRank) WithWindow(window *sql.WindowDefinition) (sql.WindowAggregation, error) {
+func (p *DenseRank) WithWindow(window *sql.WindowDefinition) sql.WindowAdaptableExpression {
 	nr := *p
 	nr.window = window
-	return &nr, nil
+	return &nr
 }
 
 func (p *DenseRank) NewWindowFunction() (sql.WindowFunction, error) {

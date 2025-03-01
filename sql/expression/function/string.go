@@ -1,4 +1,4 @@
-// Copyright 2020-2021 Dolthub, Inc.
+// Copyright 2020-2024 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -63,25 +63,17 @@ func (a *Ascii) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	switch x := val.(type) {
-	case bool:
-		if x {
-			val = 1
-		} else {
-			val = 0
-		}
-
-	case time.Time:
-		val = x.Year()
-	}
-
-	x, err := types.Text.Convert(val)
+	str, _, err := types.Text.Convert(val)
 
 	if err != nil {
 		return nil, err
 	}
 
-	s := x.(string)
+	s := str.(string)
+	if len(s) == 0 {
+		return uint8(0), nil
+	}
+
 	return s[0], nil
 }
 
@@ -91,6 +83,68 @@ func (a *Ascii) WithChildren(children ...sql.Expression) (sql.Expression, error)
 		return nil, sql.ErrInvalidChildrenNumber.New(a, len(children), 1)
 	}
 	return NewAscii(children[0]), nil
+}
+
+// Ord implements the sql function "ord" which returns the numeric value of the leftmost character
+type Ord struct {
+	*UnaryFunc
+}
+
+var _ sql.FunctionExpression = (*Ord)(nil)
+var _ sql.CollationCoercible = (*Ord)(nil)
+
+func NewOrd(arg sql.Expression) sql.Expression {
+	return &Ord{NewUnaryFunc(arg, "ORD", types.Int64)}
+}
+
+// Description implements sql.FunctionExpression
+func (o *Ord) Description() string {
+	return "return character code for leftmost character of the argument."
+}
+
+// CollationCoercibility implements the interface sql.CollationCoercible.
+func (o *Ord) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+	return sql.Collation_binary, 5
+}
+
+// Eval implements the sql.Expression interface
+func (o *Ord) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	val, err := o.EvalChild(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+
+	if val == nil {
+		return nil, nil
+	}
+
+	str, _, err := types.Text.Convert(val)
+	if err != nil {
+		return nil, err
+	}
+	s := str.(string)
+	if len(s) == 0 {
+		return int64(0), nil
+	}
+
+	// get the leftmost unicode code point as bytes
+	b := []byte(string([]rune(s)[0]))
+
+	// convert into ord
+	var res int64
+	for i, c := range b {
+		res += int64(c) << (8 * (len(b) - 1 - i))
+	}
+
+	return res, nil
+}
+
+// WithChildren implements the sql.Expression interface
+func (o *Ord) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	if len(children) != 1 {
+		return nil, sql.ErrInvalidChildrenNumber.New(o, len(children), 1)
+	}
+	return NewOrd(children[0]), nil
 }
 
 // Hex implements the sql function "hex" which returns the hexadecimal representation of the string or numeric value
@@ -146,7 +200,7 @@ func (h *Hex) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		}
 
 	case uint8, uint16, uint32, uint, int, int8, int16, int32, int64:
-		n, err := types.Int64.Convert(arg)
+		n, _, err := types.Int64.Convert(arg)
 
 		if err != nil {
 			return nil, err
@@ -291,7 +345,7 @@ func (h *Unhex) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	val, err := types.LongText.Convert(arg)
+	val, _, err := types.LongText.Convert(arg)
 
 	if err != nil {
 		return nil, err
@@ -435,22 +489,28 @@ func (h *Bin) convertToInt64(v interface{}) (int64, error) {
 		return int64(v), nil
 	case uint64:
 		if v > math.MaxInt64 {
-			return 0, sql.ErrValueOutOfRange.New(v, types.Int64)
+			return math.MaxInt64, nil
 		}
 		return int64(v), nil
 	case float32:
-		if float32(math.MaxInt64) >= v && v >= float32(math.MinInt64) {
-			return int64(v), nil
+		if v >= float32(math.MaxInt64) {
+			return math.MaxInt64, nil
+		} else if v <= float32(math.MinInt64) {
+			return math.MinInt64, nil
 		}
-		return 0, sql.ErrValueOutOfRange.New(v, types.Int64)
+		return int64(v), nil
 	case float64:
-		if float64(math.MaxInt64) >= v && v >= float64(math.MinInt64) {
-			return int64(v), nil
+		if v >= float64(math.MaxInt64) {
+			return math.MaxInt64, nil
+		} else if v <= float64(math.MinInt64) {
+			return math.MinInt64, nil
 		}
-		return 0, sql.ErrValueOutOfRange.New(v, types.Int64)
+		return int64(v), nil
 	case decimal.Decimal:
-		if v.GreaterThan(decimal.NewFromInt(math.MaxInt64)) || v.LessThan(decimal.NewFromInt(math.MinInt64)) {
-			return 0, sql.ErrValueOutOfRange.New(v.String(), types.Int64)
+		if v.GreaterThan(decimal.NewFromInt(math.MaxInt64)) {
+			return math.MaxInt64, nil
+		} else if v.LessThan(decimal.NewFromInt(math.MinInt64)) {
+			return math.MinInt64, nil
 		}
 		return v.IntPart(), nil
 	case []byte:

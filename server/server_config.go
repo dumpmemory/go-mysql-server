@@ -16,18 +16,23 @@ package server
 
 import (
 	"crypto/tls"
+	"net"
 	"time"
 
 	"github.com/dolthub/vitess/go/mysql"
 	"go.opentelemetry.io/otel/trace"
 
 	gms "github.com/dolthub/go-mysql-server"
+	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/sql"
 )
 
+// Option is an option to customize server.
+type Option func(e *sqle.Engine, sm *SessionManager, handler mysql.Handler)
+
 // Server is a MySQL server for SQLe engines.
 type Server struct {
-	Listener   *mysql.Listener
+	Listener   ProtocolListener
 	handler    mysql.Handler
 	sessionMgr *SessionManager
 	Engine     *gms.Engine
@@ -39,6 +44,9 @@ type Config struct {
 	Protocol string
 	// Address of the server.
 	Address string
+	// Custom listener for the mysql server. Use this if you don't want ports or unix sockets to be opened automatically.
+	// This can be useful in testing by using a pure go net.Conn implementation.
+	Listener net.Listener
 	// Tracer to use in the server. By default, a noop tracer will be used if
 	// no tracer is provided.
 	Tracer trace.Tracer
@@ -74,6 +82,8 @@ type Config struct {
 	// If true, queries will be logged as base64 encoded strings.
 	// If false (default behavior), queries will be logged as strings, but newlines and tabs will be replaced with spaces.
 	EncodeLoggedQuery bool
+	// Options add additional options to customize the server.
+	Options []Option
 }
 
 func (c Config) NewConfig() (Config, error) {

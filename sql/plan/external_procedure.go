@@ -44,6 +44,10 @@ func (n *ExternalProcedure) Resolved() bool {
 	return true
 }
 
+func (n *ExternalProcedure) IsReadOnly() bool {
+	return n.ExternalStoredProcedureDetails.ReadOnly
+}
+
 // String implements the interface sql.Node.
 func (n *ExternalProcedure) String() string {
 	return n.ExternalStoredProcedureDetails.Name
@@ -90,12 +94,6 @@ func (n *ExternalProcedure) WithExpressions(expressions ...sql.Expression) (sql.
 	return &nn, nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (n *ExternalProcedure) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	//TODO: when DEFINER is implemented for stored procedures then this should be added
-	return true
-}
-
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (*ExternalProcedure) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	return sql.Collation_binary, 7
@@ -124,12 +122,12 @@ func (n *ExternalProcedure) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter,
 		if err != nil {
 			return nil, err
 		}
-		exprParamVal, err = paramDefinition.Type.Convert(exprParamVal)
+		exprParamVal, _, err = paramDefinition.Type.Convert(exprParamVal)
 		if err != nil {
 			return nil, err
 		}
 
-		funcParams[i+1], err = n.processParam(ctx, funcParamType, exprParamVal)
+		funcParams[i+1], err = n.ProcessParam(ctx, funcParamType, exprParamVal)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +155,7 @@ func (n *ExternalProcedure) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter,
 	return sql.RowsToRowIter(), nil
 }
 
-func (n *ExternalProcedure) processParam(ctx *sql.Context, funcParamType reflect.Type, exprParamVal interface{}) (reflect.Value, error) {
+func (n *ExternalProcedure) ProcessParam(ctx *sql.Context, funcParamType reflect.Type, exprParamVal interface{}) (reflect.Value, error) {
 	funcParamCompType := funcParamType
 	if funcParamType.Kind() == reflect.Ptr {
 		funcParamCompType = funcParamType.Elem()

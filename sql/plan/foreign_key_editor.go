@@ -81,6 +81,21 @@ func (fkEditor *ForeignKeyEditor) IsInitialized(editors map[*ForeignKeyEditor]st
 // Update handles both the standard UPDATE statement and propagated referential actions from a parent table's ON UPDATE.
 func (fkEditor *ForeignKeyEditor) Update(ctx *sql.Context, old sql.Row, new sql.Row, depth int) error {
 	for _, reference := range fkEditor.References {
+		// Only check the reference for the columns that are updated
+		hasChange := false
+		for _, idx := range reference.RowMapper.IndexPositions {
+			cmp, err := fkEditor.Schema[idx].Type.Compare(old[idx], new[idx])
+			if err != nil {
+				return err
+			}
+			if cmp != 0 {
+				hasChange = true
+				break
+			}
+		}
+		if !hasChange {
+			continue
+		}
 		if err := reference.CheckReference(ctx, new); err != nil {
 			return err
 		}
@@ -121,7 +136,7 @@ func (fkEditor *ForeignKeyEditor) OnUpdateRestrict(ctx *sql.Context, refActionDa
 		return nil
 	}
 
-	rowIter, err := refActionData.RowMapper.GetIter(ctx, old)
+	rowIter, err := refActionData.RowMapper.GetIter(ctx, old, false)
 	if err != nil {
 		return err
 	}
@@ -144,7 +159,7 @@ func (fkEditor *ForeignKeyEditor) OnUpdateCascade(ctx *sql.Context, refActionDat
 		return nil
 	}
 
-	rowIter, err := refActionData.RowMapper.GetIter(ctx, old)
+	rowIter, err := refActionData.RowMapper.GetIter(ctx, old, false)
 	if err != nil {
 		return err
 	}
@@ -182,7 +197,7 @@ func (fkEditor *ForeignKeyEditor) OnUpdateSetNull(ctx *sql.Context, refActionDat
 		return nil
 	}
 
-	rowIter, err := refActionData.RowMapper.GetIter(ctx, old)
+	rowIter, err := refActionData.RowMapper.GetIter(ctx, old, false)
 	if err != nil {
 		return err
 	}
@@ -243,7 +258,7 @@ func (fkEditor *ForeignKeyEditor) Delete(ctx *sql.Context, row sql.Row, depth in
 
 // OnDeleteRestrict handles the ON DELETE RESTRICT referential action.
 func (fkEditor *ForeignKeyEditor) OnDeleteRestrict(ctx *sql.Context, refActionData ForeignKeyRefActionData, row sql.Row) error {
-	rowIter, err := refActionData.RowMapper.GetIter(ctx, row)
+	rowIter, err := refActionData.RowMapper.GetIter(ctx, row, false)
 	if err != nil {
 		return err
 	}
@@ -260,7 +275,7 @@ func (fkEditor *ForeignKeyEditor) OnDeleteRestrict(ctx *sql.Context, refActionDa
 
 // OnDeleteCascade handles the ON DELETE CASCADE referential action.
 func (fkEditor *ForeignKeyEditor) OnDeleteCascade(ctx *sql.Context, refActionData ForeignKeyRefActionData, row sql.Row, depth int) error {
-	rowIter, err := refActionData.RowMapper.GetIter(ctx, row)
+	rowIter, err := refActionData.RowMapper.GetIter(ctx, row, false)
 	if err != nil {
 		return err
 	}
@@ -289,7 +304,7 @@ func (fkEditor *ForeignKeyEditor) OnDeleteCascade(ctx *sql.Context, refActionDat
 
 // OnDeleteSetNull handles the ON DELETE SET NULL referential action.
 func (fkEditor *ForeignKeyEditor) OnDeleteSetNull(ctx *sql.Context, refActionData ForeignKeyRefActionData, row sql.Row, depth int) error {
-	rowIter, err := refActionData.RowMapper.GetIter(ctx, row)
+	rowIter, err := refActionData.RowMapper.GetIter(ctx, row, false)
 	if err != nil {
 		return err
 	}
@@ -377,7 +392,7 @@ func (reference *ForeignKeyReferenceHandler) CheckReference(ctx *sql.Context, ro
 		}
 	}
 
-	rowIter, err := reference.RowMapper.GetIter(ctx, row)
+	rowIter, err := reference.RowMapper.GetIter(ctx, row, true)
 	if err != nil {
 		return err
 	}
@@ -395,8 +410,8 @@ func (reference *ForeignKeyReferenceHandler) CheckReference(ctx *sql.Context, ro
 	if reference.ForeignKey.IsSelfReferential() {
 		allMatch := true
 		for i := range reference.ForeignKey.Columns {
-			colPos := reference.SelfCols[reference.ForeignKey.Columns[i]]
-			refPos := reference.SelfCols[reference.ForeignKey.ParentColumns[i]]
+			colPos := reference.SelfCols[strings.ToLower(reference.ForeignKey.Columns[i])]
+			refPos := reference.SelfCols[strings.ToLower(reference.ForeignKey.ParentColumns[i])]
 			cmp, err := reference.RowMapper.SourceSch[colPos].Type.Compare(row[colPos], row[refPos])
 			if err != nil {
 				return err
@@ -458,8 +473,8 @@ func (mapper *ForeignKeyRowMapper) IsInitialized() bool {
 }
 
 // GetIter returns a row iterator for all rows that match the given source row.
-func (mapper *ForeignKeyRowMapper) GetIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	rang := make(sql.Range, len(mapper.IndexPositions)+len(mapper.AppendTypes))
+func (mapper *ForeignKeyRowMapper) GetIter(ctx *sql.Context, row sql.Row, refCheck bool) (sql.RowIter, error) {
+	rang := make(sql.MySQLRange, len(mapper.IndexPositions)+len(mapper.AppendTypes))
 	for rangPosition, rowPos := range mapper.IndexPositions {
 		rowVal := row[rowPos]
 		// If any value is NULL then it is ignored by foreign keys
@@ -476,9 +491,17 @@ func (mapper *ForeignKeyRowMapper) GetIter(ctx *sql.Context, row sql.Row) (sql.R
 		return nil, ErrInvalidLookupForIndexedTable.New(rang.DebugString())
 	}
 	//TODO: profile this, may need to redesign this or add a fast path
-	lookup := sql.IndexLookup{Ranges: []sql.Range{rang}, Index: mapper.Index}
+	lookup := sql.IndexLookup{Ranges: sql.MySQLRangeCollection{rang}, Index: mapper.Index}
 
 	editorData := mapper.Updater.IndexedAccess(lookup)
+
+	if rc, ok := editorData.(sql.ReferenceChecker); refCheck && ok {
+		err := rc.SetReferenceCheck()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	partIter, err := editorData.LookupPartitions(ctx, lookup)
 	if err != nil {
 		return nil, err

@@ -846,6 +846,7 @@ END;`,
 			},
 		},
 	},
+
 	// DELETE triggers
 	{
 		Name: "trigger after delete, insert into other table",
@@ -1110,6 +1111,7 @@ END;`,
 			},
 		},
 	},
+
 	// Multiple triggers defined
 	{
 		Name: "triggers before and after insert",
@@ -1401,6 +1403,7 @@ end;`,
 			},
 		},
 	},
+
 	// Trigger with subquery
 	{
 		Name: "trigger before insert with subquery expressions",
@@ -1453,6 +1456,7 @@ end;`,
 			},
 		},
 	},
+
 	// Complex trigger scripts
 	{
 		Name: "trigger before insert, multiple triggers defined",
@@ -1490,6 +1494,382 @@ end;`,
 			},
 		},
 	},
+
+	{
+		Name: "nested triggers before insert before insert",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"create trigger a1 before insert on a for each row insert into b values (new.x * 2);",
+			"create trigger b1 before insert on b for each row insert into c values (new.y * 7);",
+			"insert into a values (1), (2), (3);",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a order by 1",
+				Expected: []sql.Row{
+					{1}, {2}, {3},
+				},
+			},
+			{
+				Query: "select y from b order by 1",
+				Expected: []sql.Row{
+					{2}, {4}, {6},
+				},
+			},
+			{
+				Query: "select z from c order by 1",
+				Expected: []sql.Row{
+					{14}, {28}, {42},
+				},
+			},
+		},
+	},
+	{
+		Name: "nested triggers before insert after insert",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"create trigger a1 before insert on a for each row insert into b values (new.x * 2);",
+			"create trigger b1 after insert on b for each row insert into c values (new.y * 7);",
+			"insert into a values (1), (2), (3);",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a order by 1",
+				Expected: []sql.Row{
+					{1}, {2}, {3},
+				},
+			},
+			{
+				Query: "select y from b order by 1",
+				Expected: []sql.Row{
+					{2}, {4}, {6},
+				},
+			},
+			{
+				Query: "select z from c order by 1",
+				Expected: []sql.Row{
+					{14}, {28}, {42},
+				},
+			},
+		},
+	},
+	{
+		Name: "nested triggers after insert before insert",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"create trigger a1 after insert on a for each row insert into b values (new.x * 2);",
+			"create trigger b1 before insert on b for each row insert into c values (new.y * 7);",
+			"insert into a values (1), (2), (3);",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a order by 1",
+				Expected: []sql.Row{
+					{1}, {2}, {3},
+				},
+			},
+			{
+				Query: "select y from b order by 1",
+				Expected: []sql.Row{
+					{2}, {4}, {6},
+				},
+			},
+			{
+				Query: "select z from c order by 1",
+				Expected: []sql.Row{
+					{14}, {28}, {42},
+				},
+			},
+		},
+	},
+	{
+		Name: "nested triggers after insert after insert",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"create trigger a1 after insert on a for each row insert into b values (new.x * 2);",
+			"create trigger b1 after insert on b for each row insert into c values (new.y * 7);",
+			"insert into a values (1), (2), (3);",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a order by 1",
+				Expected: []sql.Row{
+					{1}, {2}, {3},
+				},
+			},
+			{
+				Query: "select y from b order by 1",
+				Expected: []sql.Row{
+					{2}, {4}, {6},
+				},
+			},
+			{
+				Query: "select z from c order by 1",
+				Expected: []sql.Row{
+					{14}, {28}, {42},
+				},
+			},
+		},
+	},
+
+	{
+		Name: "nested triggers before delete before delete",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (10);",
+			"insert into c values (100);",
+			"create trigger a1 before delete on a for each row delete from b where y = (old.x * 10);",
+			"create trigger b1 before delete on b for each row delete from c where z = (old.y * 10);",
+			"delete from a where x = 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query:    "select x from a;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select y from b;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select z from c;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+	{
+		Name: "nested triggers before delete after delete",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (10);",
+			"insert into c values (100);",
+			"create trigger a1 before delete on a for each row delete from b where y = (old.x * 10);",
+			"create trigger b1 after delete on b for each row delete from c where z = (old.y * 10);",
+			"delete from a where x = 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query:    "select x from a;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select y from b;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select z from c;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+	{
+		Name: "nested triggers after delete before delete",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (10);",
+			"insert into c values (100);",
+			"create trigger a1 after delete on a for each row delete from b where y = (old.x * 10);",
+			"create trigger b1 before delete on b for each row delete from c where z = (old.y * 10);",
+			"delete from a where x = 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query:    "select x from a;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select y from b;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select z from c;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+	{
+		Name: "nested triggers after delete after delete",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (10);",
+			"insert into c values (100);",
+			"create trigger a1 after delete on a for each row delete from b where y = (old.x * 10);",
+			"create trigger b1 after delete on b for each row delete from c where z = (old.y * 10);",
+			"delete from a where x = 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query:    "select x from a;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select y from b;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select z from c;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+
+	{
+		Name: "nested triggers before update before update",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (2);",
+			"insert into c values (3);",
+			"create trigger a1 before update on a for each row update b set y = y + old.x + new.x;",
+			"create trigger b1 before update on b for each row update c set z = z + old.y + new.y;",
+			"update a set x = x + 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a;",
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Query: "select y from b;",
+				Expected: []sql.Row{
+					{5},
+				},
+			},
+			{
+				Query: "select z from c;",
+				Expected: []sql.Row{
+					{10},
+				},
+			},
+		},
+	},
+	{
+		Name: "nested triggers before update after update",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (2);",
+			"insert into c values (3);",
+			"create trigger a1 before update on a for each row update b set y = y + old.x + new.x;",
+			"create trigger b1 after update on b for each row update c set z = z + old.y + new.y;",
+			"update a set x = x + 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a;",
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Query: "select y from b;",
+				Expected: []sql.Row{
+					{5},
+				},
+			},
+			{
+				Query: "select z from c;",
+				Expected: []sql.Row{
+					{10},
+				},
+			},
+		},
+	},
+	{
+		Name: "nested triggers after update before update",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (2);",
+			"insert into c values (3);",
+			"create trigger a1 after update on a for each row update b set y = y + old.x + new.x;",
+			"create trigger b1 before update on b for each row update c set z = z + old.y + new.y;",
+			"update a set x = x + 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a;",
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Query: "select y from b;",
+				Expected: []sql.Row{
+					{5},
+				},
+			},
+			{
+				Query: "select z from c;",
+				Expected: []sql.Row{
+					{10},
+				},
+			},
+		},
+	},
+	{
+		Name: "nested triggers after update after update",
+		SetUpScript: []string{
+			"create table a (x int primary key);",
+			"create table b (y int primary key);",
+			"create table c (z int primary key);",
+			"insert into a values (1);",
+			"insert into b values (2);",
+			"insert into c values (3);",
+			"create trigger a1 after update on a for each row update b set y = y + old.x + new.x;",
+			"create trigger b1 after update on b for each row update c set z = z + old.y + new.y;",
+			"update a set x = x + 1;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select x from a;",
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Query: "select y from b;",
+				Expected: []sql.Row{
+					{5},
+				},
+			},
+			{
+				Query: "select z from c;",
+				Expected: []sql.Row{
+					{10},
+				},
+			},
+		},
+	},
+
 	{
 		Name: "trigger with signal",
 		SetUpScript: []string{
@@ -1854,15 +2234,15 @@ end;`,
 			},
 			{
 				Query:    "drop trigger t4",
-				Expected: []sql.Row{},
+				Expected: []sql.Row{{types.OkResult{}}},
 			},
 			{
 				Query:    "drop trigger t3",
-				Expected: []sql.Row{},
+				Expected: []sql.Row{{types.OkResult{}}},
 			},
 			{
 				Query:    "drop trigger if exists t5",
-				Expected: []sql.Row{},
+				Expected: []sql.Row{{types.OkResult{}}},
 			},
 			{
 				Query:       "drop trigger t5",
@@ -1877,7 +2257,7 @@ end;`,
 			},
 			{
 				Query:    "drop trigger if exists t2",
-				Expected: []sql.Row{},
+				Expected: []sql.Row{{types.OkResult{}}},
 			},
 			{
 				Query: "select trigger_name from information_schema.triggers order by 1",
@@ -2127,7 +2507,7 @@ end;`,
 			},
 			{
 				Query:    "INSERT INTO `film` VALUES (3,'ADAPTATION HOLES','An Astounding Reflection in A Baloon Factory'),(4,'AFFAIR PREJUDICE','A Fanciful Documentary in A Shark Tank')",
-				Expected: []sql.Row{{types.OkResult{RowsAffected: 2, InsertID: 3}}},
+				Expected: []sql.Row{{types.OkResult{RowsAffected: 2, InsertID: 0}}},
 			},
 			{
 				Query:    "SELECT COUNT(*) FROM film",
@@ -2186,8 +2566,9 @@ INSERT INTO t0 (v1, v2) VALUES (i, s); END;`,
 				Expected: []sql.Row{{types.OkResult{}}},
 			},
 			{
-				Query:    "CALL add_entry(4, 'aaa');",
-				Expected: []sql.Row{{types.OkResult{RowsAffected: 1, InsertID: 1}}},
+				SkipResultCheckOnServerEngine: true, // call depends on stored procedure stmt for whether to use 'query' or 'exec' from go sql driver.
+				Query:                         "CALL add_entry(4, 'aaa');",
+				Expected:                      []sql.Row{{types.OkResult{RowsAffected: 1, InsertID: 1}}},
 			},
 			{
 				Query:    "SELECT * FROM t0;",
@@ -2200,6 +2581,834 @@ INSERT INTO t0 (v1, v2) VALUES (i, s); END;`,
 			{
 				Query:          "CALL add_entry(54, 'bbb');",
 				ExpectedErrStr: "too big number (errno 1644) (sqlstate 45000)",
+			},
+		},
+	},
+
+	{
+		Name: "triggers with nested begin-end blocks",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			`
+    create trigger trig
+    before insert on t
+    for each row
+    begin
+      declare x int;
+      set x = new.i * 10;
+      begin
+        declare y int;
+        set y = new.i + 10;
+        set new.i = x + y;
+      end;
+    end;
+    `,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{21},
+					{32},
+					{43},
+				},
+			},
+		},
+	},
+	{
+		Name: "triggers with declare statements and select into",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			"create trigger trig before insert on t for each row begin declare x int; select new.i + 10 into x; set new.i = x; end;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{11},
+					{12},
+					{13},
+				},
+			},
+		},
+	},
+	{
+		Name: "triggers with declare statements and set",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			"create trigger trig before insert on t for each row begin declare x int; set x = new.i + 10; set new.i = x; end;",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{11},
+					{12},
+					{13},
+				},
+			},
+		},
+	},
+	{
+		Name: "triggers with declare statements and insert",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			"create table t2 (i int primary key);",
+			`
+create trigger trig before
+insert on t for each row begin
+	declare x int;
+	set x = new.i * 10;
+	insert into t2 values (x);
+end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{3},
+				},
+			},
+			{
+				Query: "select * from t2;",
+				Expected: []sql.Row{
+					{10},
+					{20},
+					{30},
+				},
+			},
+		},
+	},
+	{
+		Name: "triggers with declare statements and update",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			"create table t2 (i int primary key);",
+			"insert into t2 values (1), (2), (3);",
+			`
+create trigger trig before
+insert on t for each row begin
+	declare x int;
+	set x = new.i * 10;
+	update t2 set i = x where i = new.i;
+end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{3},
+				},
+			},
+			{
+				Query: "select * from t2;",
+				Expected: []sql.Row{
+					{10},
+					{20},
+					{30},
+				},
+			},
+		},
+	},
+	{
+		Name: "triggers with declare statements and delete",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			"create table t2 (i int primary key);",
+			"insert into t2 values (1), (2), (3);",
+			`
+create trigger trig before
+insert on t for each row begin
+	declare x int;
+	set x = new.i;
+	delete from t2 where i = x;
+end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{3},
+				},
+			},
+			{
+				Query:    "select * from t2;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+	{
+		Name: "triggers with declare statements and stored procedure",
+		SetUpScript: []string{
+			"create table t (i int primary key);",
+			"create table t2 (i int primary key);",
+			`
+create procedure proc(in i int)
+begin
+	insert into t2 values (i);
+end;
+`,
+			`
+create trigger trig before
+insert on t for each row begin
+	declare x int;
+	set x = new.i + 10;
+	call proc(x);
+end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t values (1), (2), (3);",
+				Expected: []sql.Row{
+					{types.NewOkResult(3)},
+				},
+			},
+			{
+				Query: "select * from t;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{3},
+				},
+			},
+			{
+				Query: "select * from t2;",
+				Expected: []sql.Row{
+					{11},
+					{12},
+					{13},
+				},
+			},
+		},
+	},
+
+	{
+		Name: "triggers with multiple references to same table",
+		SetUpScript: []string{
+			"create table t1 (i int);",
+			"create table t2 (j int);",
+			`
+    create trigger trig before insert on t1 
+    for each row 
+    begin
+    	insert into t2 values (10 * new.i);
+    	insert into t2 values (20 * new.i);
+    	insert into t2 values (30 * new.i);
+    	update t2 set j = 100 * j;
+    	delete from t2 where j = 2000 * new.i;
+    end;
+    `,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t1 values (1);",
+				Expected: []sql.Row{
+					{types.NewOkResult(1)},
+				},
+			},
+			{
+				Query: "select * from t1 order by i;",
+				Expected: []sql.Row{
+					{1},
+				},
+			},
+			{
+				Query: "select * from t2 order by j;",
+				Expected: []sql.Row{
+					{1000},
+					{3000},
+				},
+			},
+		},
+	},
+
+	// Nested Triggers
+	{
+		Name: "double nested triggers referencing multiple tables",
+		SetUpScript: []string{
+			"create table t (i int);",
+			"create table tt (i int);",
+			"create table t1 (id int primary key, t2_id int);",
+			"create table t2 (id int primary key, t3_id int);",
+			"create table t3 (id int primary key);",
+
+			"insert into tt values (1), (2), (3);",
+			"insert into t1 values (1, 2);",
+			"insert into t2 values (2, 3);",
+			"insert into t3 values (3);",
+
+			`
+create trigger trig1 after delete on t1
+for each row
+  begin
+	insert into t values (old.id);
+    insert into t values (old.t2_id);
+    update tt set i = 10 * old.id where i = old.t2_id;
+    delete from t2 where id = old.t2_id;
+  end;
+`,
+			`
+create trigger trig2 after delete on t2
+for each row
+  begin
+	insert into t values (old.id);
+    insert into t values (old.t3_id);
+    update tt set i = 10 * old.id where i = old.t3_id;
+    delete from t3 where id = old.t3_id;
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "delete from t1 where id = 1;",
+				Expected: []sql.Row{
+					{types.NewOkResult(1)},
+				},
+			},
+			{
+				Query: "select * from t order by i;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{2},
+					{3},
+				},
+			},
+			{
+				Query: "select * from tt order by i;",
+				Expected: []sql.Row{
+					{1},
+					{10},
+					{20},
+				},
+			},
+			{
+				Query:    "select * from t1;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select * from t2;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select * from t3;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+	{
+		Name: "triple nested delete triggers referencing multiple tables",
+		SetUpScript: []string{
+			"create table t (i int);",
+			"create table tt (i int);",
+			"create table t1 (id int primary key, t2_id int);",
+			"create table t2 (id int primary key, t3_id int);",
+			"create table t3 (id int primary key);",
+
+			"insert into tt values (1), (2), (3);",
+			"insert into t1 values (1, 2);",
+			"insert into t2 values (2, 3);",
+			"insert into t3 values (3);",
+
+			`
+create trigger trig1 after delete on t1
+for each row
+  begin
+	insert into t values (old.id);
+    insert into t values (old.t2_id);
+    update tt set i = 10 * old.t2_id where i = old.id;
+    delete from t2 where id = old.t2_id;
+  end;
+`,
+			`
+create trigger trig2 after delete on t2
+for each row
+  begin
+	insert into t values (old.id);
+    insert into t values (old.t3_id);
+    update tt set i = 10 * old.t3_id where i = old.id;
+    delete from t3 where id = old.t3_id;
+  end;
+`,
+			`
+create trigger trig3 after delete on t3
+for each row
+  begin
+	insert into t values (old.id);
+    update tt set i = 9999 where i = old.id;
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "delete from t1 where id = 1;",
+				Expected: []sql.Row{
+					{types.NewOkResult(1)},
+				},
+			},
+			{
+				Query: "select * from t order by i;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{2},
+					{3},
+					{3},
+				},
+			},
+			{
+				Query: "select * from tt order by i;",
+				Expected: []sql.Row{
+					{20},
+					{30},
+					{9999},
+				},
+			},
+			{
+				Query:    "select * from t1;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select * from t2;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query:    "select * from t3;",
+				Expected: []sql.Row{},
+			},
+		},
+	},
+	{
+		Name: "triple nested insert triggers referencing multiple tables",
+		SetUpScript: []string{
+			"create table t (i int);",
+			"create table tt (i int primary key, j int);",
+			"create table ttt (i int primary key);",
+			"create table t1 (i int primary key);",
+			"create table t2 (i int primary key, j int);",
+			"create table t3 (i int primary key, j int, k int);",
+			"insert into tt values (1, 0), (2, 0), (3, 0);",
+			"insert into ttt values (1), (2), (3);",
+
+			`
+create trigger trig1 after insert on t1
+for each row
+  begin
+	insert into t values (new.i);
+    update tt set j = 100 * new.i where i = new.i;
+    delete from ttt where i = new.i;
+    insert into t2 values (new.i + 1, 10 * new.i);
+  end;
+`,
+			`
+create trigger trig2 after insert on t2
+for each row
+  begin
+	insert into t values (new.i), (new.j);
+    update tt set j = 100 * new.i where i = new.i;
+    delete from ttt where i = new.i;
+    insert into t3 values (new.i + 1, 10 * new.j, new.i + new.j);
+  end;
+`,
+			`
+create trigger trig3 after insert on t3
+for each row
+  begin
+	insert into t values (new.i), (new.j), (new.k);
+    update tt set j = 100 * new.i where i = new.i;
+    delete from ttt where i = new.i;
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "insert into t1 values (1);",
+				Expected: []sql.Row{
+					{types.NewOkResult(1)},
+				},
+			},
+			{
+				Query: "select * from t order by i;",
+				Expected: []sql.Row{
+					{1},
+					{2},
+					{3},
+					{10},
+					{12},
+					{100},
+				},
+			},
+			{
+				Query: "select * from tt order by i;",
+				Expected: []sql.Row{
+					{1, 100},
+					{2, 200},
+					{3, 300},
+				},
+			},
+			{
+				Query:    "select * from ttt order by i;",
+				Expected: []sql.Row{},
+			},
+			{
+				Query: "select * from t1;",
+				Expected: []sql.Row{
+					{1},
+				},
+			},
+			{
+				Query: "select * from t2;",
+				Expected: []sql.Row{
+					{2, 10},
+				},
+			},
+			{
+				Query: "select * from t3;",
+				Expected: []sql.Row{
+					{3, 100, 12},
+				},
+			},
+		},
+	},
+	{
+		Name: "triple nested update triggers referencing multiple tables",
+		SetUpScript: []string{
+			"create table t (i int);",
+			"create table tt (i int primary key, j int);",
+			"insert into tt values (1, 0), (2, 0), (3, 0);",
+			"create table ttt (i int primary key);",
+			"insert into ttt values (1), (2), (3);",
+			"create table t1 (i int primary key);",
+			"create table t2 (i int primary key, j int);",
+			"create table t3 (i int primary key, j int, k int);",
+			"insert into t1 values (1);",
+			"insert into t2 values (1, 0);",
+			"insert into t3 values (1, 0, 0);",
+			`
+create trigger trig1 after update on t1
+for each row
+  begin
+	insert into t values (old.i), (new.i);
+    update tt set j = 100 * new.i where i = new.i;
+    delete from ttt where i = new.i;
+    update t2 set j = 10 * new.i where i = old.i;
+  end;
+`,
+			`
+create trigger trig2 after update on t2
+for each row
+  begin
+	insert into t values (old.i), (old.j), (new.i), (new.j);
+    update tt set j = 100 * new.i where i = new.i;
+    delete from ttt where i = new.i;
+    update t3 set j = 10 * new.i where i = old.i;
+    update t3 set k = 100 * new.i where i = old.i;
+  end;
+`,
+			`
+create trigger trig3 after update on t3
+for each row
+  begin
+	insert into t values (old.i), (new.i), (old.j), (new.j), (old.k), (new.k);
+    update tt set j = 100 * new.i where i = new.i;
+    delete from ttt where i = new.i;
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "update t1 set i = 2 where i = 1;",
+				Expected: []sql.Row{
+					{types.OkResult{RowsAffected: 1, Info: plan.UpdateInfo{Matched: 1, Updated: 1}}},
+				},
+			},
+			{
+				Query: "select * from t order by i;",
+				Expected: []sql.Row{
+					{0},
+					{0},
+					{0},
+					{0},
+					{0},
+					{1},
+					{1},
+					{1},
+					{1},
+					{1},
+					{1},
+					{1},
+					{2},
+					{10},
+					{10},
+					{10},
+					{20},
+					{100},
+				},
+			},
+			{
+				Query: "select * from tt order by i;",
+				Expected: []sql.Row{
+					{1, 100},
+					{2, 200},
+					{3, 0},
+				},
+			},
+			{
+				Query: "select * from ttt order by i;",
+				Expected: []sql.Row{
+					{3},
+				},
+			},
+			{
+				Query: "select * from t1;",
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+			{
+				Query: "select * from t2;",
+				Expected: []sql.Row{
+					{1, 20},
+				},
+			},
+			{
+				Query: "select * from t3;",
+				Expected: []sql.Row{
+					{1, 10, 100},
+				},
+			},
+		},
+	},
+
+	// Triggers with subqueries
+	{
+		Name: "insert trigger with subquery projections",
+		SetUpScript: []string{
+			"create table t (i int primary key, j int);",
+			`
+create trigger trig1 before insert on t
+for each row
+  begin
+	set @a = (select 10 * new.i);
+    set @b = (select 20 * new.j);
+  end;
+`,
+			`
+create trigger trig2 after insert on t
+for each row
+  begin
+	set @c = (select 30 * new.i);
+    set @d = (select 40 * new.j);
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{nil, nil, nil, nil},
+				},
+			},
+			{
+				Query: "insert into t values (1, 2);",
+				Expected: []sql.Row{
+					{types.OkResult{RowsAffected: 1}},
+				},
+			},
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{10, 40, 30, 80},
+				},
+			},
+			{
+				Query:          "insert into t values (1, 200);",
+				ExpectedErrStr: "duplicate primary key given: [1]",
+			},
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{10, 4000, 30, 80},
+				},
+			},
+		},
+	},
+	{
+		Name: "delete trigger with subquery projections",
+		SetUpScript: []string{
+			"create table t (i int primary key, j int);",
+			"insert into t values (1, 2), (3, 4);",
+			`
+create trigger trig1 before delete on t
+for each row
+  begin
+	set @a = (select 10 * old.i);
+    set @b = (select 20 * old.j);
+  end;
+`,
+			`
+create trigger trig2 after delete on t
+for each row
+  begin
+	set @c = (select 30 * old.i);
+    set @d = (select 40 * old.j);
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{nil, nil, nil, nil},
+				},
+			},
+			{
+				Query: "delete from t where i = 1;",
+				Expected: []sql.Row{
+					{types.OkResult{RowsAffected: 1}},
+				},
+			},
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{10, 40, 30, 80},
+				},
+			},
+			{
+				Query: "delete from t where j = 4;",
+				Expected: []sql.Row{
+					{types.OkResult{RowsAffected: 1}},
+				},
+			},
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{30, 80, 90, 160},
+				},
+			},
+		},
+	},
+	{
+		Name: "update trigger with subquery projections",
+		SetUpScript: []string{
+			"create table t (i int primary key, j int);",
+			"insert into t values (1, 2), (3, 4);",
+			`
+create trigger trig1 before update on t
+for each row
+  begin
+	set @a = (select 10 * old.i + new.i);
+    set @b = (select 20 * old.j + new.j);
+  end;
+`,
+			`
+create trigger trig2 after update on t
+for each row
+  begin
+	set @c = (select 30 * old.i + new.i);
+    set @d = (select 40 * old.j + new.j);
+  end;
+`,
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{nil, nil, nil, nil},
+				},
+			},
+			{
+				Query: "update t set i = i * 10 where i = 1;",
+				Expected: []sql.Row{
+					{types.OkResult{RowsAffected: 1, Info: plan.UpdateInfo{Matched: 1, Updated: 1}}},
+				},
+			},
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{20, 42, 40, 82},
+				},
+			},
+			{
+				Query: "update t set j = i * 10 where j = 4;",
+				Expected: []sql.Row{
+					{types.OkResult{RowsAffected: 1, Info: plan.UpdateInfo{Matched: 1, Updated: 1}}},
+				},
+			},
+			{
+				Query: "select @a, @b, @c, @d;",
+				Expected: []sql.Row{
+					{33, 110, 93, 190},
+				},
+			},
+		},
+	},
+}
+
+var TriggerCreateInSubroutineTests = []ScriptTest{
+	{
+		Name: "triggers cannot contain or be contained in other stored routines",
+		SetUpScript: []string{
+			"CREATE TABLE t (pk INT PRIMARY KEY);",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query:          "CREATE PROCEDURE bar() CREATE TRIGGER foo AFTER UPDATE ON t FOR EACH ROW BEGIN SELECT 1; END;",
+				ExpectedErrStr: "can't create a TRIGGER from within another stored routine",
+			},
+			{
+				Query:          "CREATE TRIGGER foo AFTER UPDATE ON t FOR EACH ROW BEGIN CREATE PROCEDURE bar() SELECT 1; END",
+				ExpectedErrStr: "can't create a PROCEDURE from within another stored routine",
+			},
+			{
+				Query:          "CREATE EVENT foo ON SCHEDULE EVERY 1 YEAR DO CREATE TRIGGER foo AFTER UPDATE ON t FOR EACH ROW BEGIN SELECT 1; END;",
+				ExpectedErrStr: "can't create a TRIGGER from within another stored routine",
 			},
 		},
 	},
@@ -3072,7 +4281,7 @@ var TriggerErrorTests = []ScriptTest{
 			"create table x (a int primary key, b int, c int)",
 		},
 		Query:       "create trigger old_on_insert before insert on x for each row set new.c = old.a + 1",
-		ExpectedErr: sql.ErrInvalidUseOfOldNew,
+		ExpectedErr: sql.ErrTableNotFound,
 	},
 	{
 		Name: "reference to new on delete",
@@ -3080,7 +4289,7 @@ var TriggerErrorTests = []ScriptTest{
 			"create table x (a int primary key, b int, c int)",
 		},
 		Query:       "create trigger new_on_delete before delete on x for each row set new.c = old.a + 1",
-		ExpectedErr: sql.ErrInvalidUseOfOldNew,
+		ExpectedErr: sql.ErrTableNotFound,
 	},
 	{
 		Name: "set old row on update",
@@ -3128,7 +4337,7 @@ var TriggerErrorTests = []ScriptTest{
 			"create table x (a int primary key, b int, c int)",
 		},
 		Query:       "create trigger not_found before insert on x for each row set new.d = new.d + 1",
-		ExpectedErr: sql.ErrUnknownColumn,
+		ExpectedErr: sql.ErrTableNotFound,
 	},
 	{
 		Name: "target column doesn't exist",
@@ -3136,6 +4345,15 @@ var TriggerErrorTests = []ScriptTest{
 			"create table x (a int primary key, b int, c int)",
 		},
 		Query:       "create trigger not_found before insert on x for each row set new.d = new.a + 1",
-		ExpectedErr: sql.ErrUnknownColumn,
+		ExpectedErr: sql.ErrTableNotFound,
+	},
+	{
+		Name: "prevent creating trigger over views",
+		SetUpScript: []string{
+			"create table x (a int primary key, b int, c int)",
+			"create view v as select * from x",
+		},
+		Query:       "create trigger trig before insert on v for each row set b = 1",
+		ExpectedErr: sql.ErrExpectedTableFoundView,
 	},
 }

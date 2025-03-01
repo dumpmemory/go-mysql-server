@@ -1,15 +1,17 @@
 package analyzer
 
 import (
+	"strings"
+
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
 )
 
-// modifyUpdateExpressionsForJoin searches for a JOIN for UPDATE query and updates the child of the original update
+// modifyUpdateExprsForJoin searches for a JOIN for UPDATE query and updates the child of the original update
 // node to use a plan.UpdateJoin node as a child.
-func modifyUpdateExpressionsForJoin(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scope, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func modifyUpdateExprsForJoin(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	switch n := n.(type) {
 	case *plan.Update:
 		us, ok := n.Child.(*plan.UpdateSource)
@@ -61,10 +63,7 @@ func rowUpdatersByTable(ctx *sql.Context, node sql.Node, ij sql.Node) (map[strin
 			return nil, plan.ErrUpdateForTableNotSupported.New(tableToBeUpdated)
 		}
 
-		var table = resolvedTable.Table
-		if t, ok := table.(sql.TableWrapper); ok {
-			table = t.Underlying()
-		}
+		var table = resolvedTable.UnderlyingTable()
 
 		// If there is no UpdatableTable for a table being updated, error out
 		updatable, ok := table.(sql.UpdatableTable)
@@ -90,8 +89,8 @@ func getTablesToBeUpdated(node sql.Node) map[string]struct{} {
 	transform.InspectExpressions(node, func(e sql.Expression) bool {
 		switch e := e.(type) {
 		case *expression.SetField:
-			gf := e.Left.(*expression.GetField)
-			ret[gf.Table()] = struct{}{}
+			gf := e.LeftChild.(*expression.GetField)
+			ret[strings.ToLower(gf.Table())] = struct{}{}
 			return false
 		}
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/mitchellh/hashstructure"
+	"github.com/cespare/xxhash/v2"
 	"github.com/shopspring/decimal"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -80,7 +80,7 @@ func (m *sumBuffer) PerformSum(v interface{}) {
 	// decimal.Decimal values are evaluated to string value even though the Literal expr type is Decimal type,
 	// so convert it to appropriate Decimal type
 	if s, isStr := v.(string); isStr && types.IsDecimal(m.expr.Type()) {
-		val, err := m.expr.Type().Convert(s)
+		val, _, err := m.expr.Type().Convert(s)
 		if err == nil {
 			v = val
 		}
@@ -98,7 +98,7 @@ func (m *sumBuffer) PerformSum(v interface{}) {
 			m.sum = decimal.NewFromFloat(m.sum.(float64)).Add(n)
 		}
 	default:
-		val, err := types.Float64.Convert(n)
+		val, _, err := types.Float64.Convert(n)
 		if err != nil {
 			val = float64(0)
 		}
@@ -106,7 +106,7 @@ func (m *sumBuffer) PerformSum(v interface{}) {
 			m.sum = float64(0)
 			m.isnil = false
 		}
-		sum, err := types.Float64.Convert(m.sum)
+		sum, _, err := types.Float64.Convert(m.sum)
 		if err != nil {
 			sum = float64(0)
 		}
@@ -260,7 +260,7 @@ func (b *bitAndBuffer) Update(ctx *sql.Context, row sql.Row) error {
 		return nil
 	}
 
-	v, err = types.Uint64.Convert(v)
+	v, _, err = types.Uint64.Convert(v)
 	if err != nil {
 		v = uint64(0)
 	}
@@ -307,7 +307,7 @@ func (b *bitOrBuffer) Update(ctx *sql.Context, row sql.Row) error {
 		return nil
 	}
 
-	v, err = types.Uint64.Convert(v)
+	v, _, err = types.Uint64.Convert(v)
 	if err != nil {
 		v = uint64(0)
 	}
@@ -354,7 +354,7 @@ func (b *bitXorBuffer) Update(ctx *sql.Context, row sql.Row) error {
 		return nil
 	}
 
-	v, err = types.Uint64.Convert(v)
+	v, _, err = types.Uint64.Convert(v)
 	if err != nil {
 		v = uint64(0)
 	}
@@ -402,7 +402,7 @@ func (c *countDistinctBuffer) Update(ctx *sql.Context, row sql.Row) error {
 	if _, ok := c.exprs[0].(*expression.Star); ok {
 		value = row
 	} else {
-		val := make([]interface{}, len(c.exprs))
+		val := make(sql.Row, len(c.exprs))
 		for i, expr := range c.exprs {
 			v, err := expr.Eval(ctx, row)
 			if err != nil {
@@ -417,12 +417,30 @@ func (c *countDistinctBuffer) Update(ctx *sql.Context, row sql.Row) error {
 		value = val
 	}
 
-	hash, err := hashstructure.Hash(value, nil)
-	if err != nil {
-		return fmt.Errorf("count distinct unable to hash value: %s", err)
+	var str string
+	for _, val := range value.(sql.Row) {
+		// skip nil values
+		if val == nil {
+			return nil
+		}
+		v, _, err := types.Text.Convert(val)
+		if err != nil {
+			return err
+		}
+		vv, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("count distinct unable to hash value: %s", err)
+		}
+		str += vv + ","
 	}
 
-	c.seen[hash] = struct{}{}
+	hash := xxhash.New()
+	_, err := hash.WriteString(str)
+	if err != nil {
+		return err
+	}
+	h := hash.Sum64()
+	c.seen[h] = struct{}{}
 
 	return nil
 }
@@ -628,12 +646,11 @@ func (j *jsonArrayBuffer) Update(ctx *sql.Context, row sql.Row) error {
 	}
 
 	// unwrap JSON values
-	if js, ok := v.(types.JSONValue); ok {
-		doc, err := js.Unmarshall(ctx)
+	if js, ok := v.(sql.JSONWrapper); ok {
+		v, err = js.ToInterface()
 		if err != nil {
 			return err
 		}
-		v = doc.Val
 	}
 
 	j.vals = append(j.vals, v)

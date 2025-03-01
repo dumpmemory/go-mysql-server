@@ -1,4 +1,4 @@
-// Copyright 2020-2021 Dolthub, Inc.
+// Copyright 2020-2024 Dolthub, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -131,7 +131,7 @@ func (r *Rand) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 
 	var seed int64
 	if types.IsNumber(r.Child.Type()) {
-		e, err = types.Int64.Convert(e)
+		e, _, err = types.Int64.Convert(e)
 		if err == nil {
 			seed = e.(int64)
 		}
@@ -174,7 +174,7 @@ func (s *Sin) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +223,7 @@ func (s *Cos) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
@@ -272,12 +272,16 @@ func (t *Tan) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
+	res := math.Tan(n.(float64))
+	if math.IsNaN(res) {
+		return nil, nil
+	}
 
-	return math.Tan(n.(float64)), nil
+	return res, nil
 }
 
 // WithChildren implements sql.Expression
@@ -321,12 +325,17 @@ func (a *Asin) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
 
-	return math.Asin(n.(float64)), nil
+	res := math.Asin(n.(float64))
+	if math.IsNaN(res) {
+		return nil, nil
+	}
+
+	return res, nil
 }
 
 // WithChildren implements sql.Expression
@@ -370,12 +379,17 @@ func (a *Acos) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
 
-	return math.Acos(n.(float64)), nil
+	res := math.Acos(n.(float64))
+	if math.IsNaN(res) {
+		return nil, nil
+	}
+
+	return res, nil
 }
 
 // WithChildren implements sql.Expression
@@ -387,15 +401,55 @@ func (a *Acos) WithChildren(children ...sql.Expression) (sql.Expression, error) 
 }
 
 type Atan struct {
-	*UnaryFunc
+	x, y sql.Expression
 }
 
 var _ sql.FunctionExpression = (*Atan)(nil)
 var _ sql.CollationCoercible = (*Atan)(nil)
 
 // NewAtan returns a new ATAN function expression
-func NewAtan(arg sql.Expression) sql.Expression {
-	return &Atan{NewUnaryFunc(arg, "ATAN", types.Float64)}
+func NewAtan(args ...sql.Expression) (sql.Expression, error) {
+	if len(args) == 1 {
+		return &Atan{x: expression.NewLiteral(1, types.Int32), y: args[0]}, nil
+	}
+	if len(args) == 2 {
+		return &Atan{x: args[1], y: args[0]}, nil
+	}
+	return nil, sql.ErrInvalidArgumentNumber.New("atan", "1 or 2", len(args))
+}
+
+// FunctionName implements sql.FunctionExpression
+func (a *Atan) FunctionName() string {
+	return "atan"
+}
+
+// Resolved implements sql.Expression
+func (a *Atan) Resolved() bool {
+	if a.x != nil && !a.x.Resolved() {
+		return false
+	}
+	if a.y != nil && !a.y.Resolved() {
+		return false
+	}
+	return true
+}
+
+// String implements sql.Expression
+func (a *Atan) String() string {
+	if a.x != nil {
+		return fmt.Sprintf("%s(%s, %s)", a.FunctionName(), a.x, a.y)
+	}
+	return fmt.Sprintf("%s(%s)", a.FunctionName(), a.y)
+}
+
+// Type implements sql.Expression
+func (a *Atan) Type() sql.Type {
+	return types.Float64
+}
+
+// IsNullable implements sql.Expression
+func (a *Atan) IsNullable() bool {
+	return true
 }
 
 // Description implements sql.FunctionExpression
@@ -410,29 +464,54 @@ func (*Atan) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID,
 
 // Eval implements sql.Expression
 func (a *Atan) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	val, err := a.EvalChild(ctx, row)
-	if err != nil {
-		return nil, err
-	}
-
-	if val == nil {
+	if a.y == nil {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	yy, err := a.y.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
 
-	return math.Atan(n.(float64)), nil
+	if yy == nil {
+		return nil, nil
+	}
+
+	var xx interface{} = float64(1)
+	if a.x != nil {
+		xx, err = a.x.Eval(ctx, row)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if xx == nil {
+		return nil, nil
+	}
+
+	nx, _, err := types.Float64.Convert(xx)
+	if err != nil {
+		return nil, err
+	}
+
+	ny, _, err := types.Float64.Convert(yy)
+	if err != nil {
+		return nil, err
+	}
+
+	return math.Atan2(ny.(float64), nx.(float64)), nil
+}
+
+// Children implements sql.Expression
+func (a *Atan) Children() []sql.Expression {
+	if a.x == nil {
+		return []sql.Expression{a.y}
+	}
+	return []sql.Expression{a.y, a.x}
 }
 
 // WithChildren implements sql.Expression
 func (a *Atan) WithChildren(children ...sql.Expression) (sql.Expression, error) {
-	if len(children) != 1 {
-		return nil, sql.ErrInvalidChildrenNumber.New(a, len(children), 1)
-	}
-	return NewAtan(children[0]), nil
+	return NewAtan(children...)
 }
 
 type Cot struct {
@@ -468,12 +547,22 @@ func (c *Cot) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
 
-	return 1.0 / math.Tan(n.(float64)), nil
+	tan := math.Tan(n.(float64))
+	if math.IsNaN(tan) {
+		return nil, nil
+	}
+
+	res := 1.0 / tan
+	if math.IsInf(res, 0) {
+		return nil, sql.ErrValueOutOfRange.New("DOUBLE", c.Name)
+	}
+
+	return res, nil
 }
 
 // WithChildren implements sql.Expression
@@ -522,7 +611,7 @@ func (d *Degrees) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +660,7 @@ func (r *Radians) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	n, err := types.Float64.Convert(val)
+	n, _, err := types.Float64.Convert(val)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +714,7 @@ func (c *Crc32) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	case string:
 		bytes = []byte(val)
 	case int8, int16, int32, int64, int:
-		val, err := types.Int64.Convert(arg)
+		val, _, err := types.Int64.Convert(arg)
 
 		if err != nil {
 			return nil, err
@@ -633,7 +722,7 @@ func (c *Crc32) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 
 		bytes = []byte(strconv.FormatInt(val.(int64), 10))
 	case uint8, uint16, uint32, uint64, uint:
-		val, err := types.Uint64.Convert(arg)
+		val, _, err := types.Uint64.Convert(arg)
 
 		if err != nil {
 			return nil, err
@@ -716,7 +805,7 @@ func (s *Sign) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 
 	switch typedVal := arg.(type) {
 	case int8, int16, int32, int64, float64, float32, int, decimal.Decimal:
-		val, err := types.Int64.Convert(arg)
+		val, _, err := types.Int64.Convert(arg)
 
 		if err != nil {
 			return nil, err
@@ -732,7 +821,7 @@ func (s *Sign) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return int8(1), nil
 
 	case uint8, uint16, uint32, uint64, uint:
-		val, err := types.Uint64.Convert(arg)
+		val, _, err := types.Uint64.Convert(arg)
 
 		if err != nil {
 			return nil, err
@@ -783,4 +872,129 @@ func NewMod(args ...sql.Expression) (sql.Expression, error) {
 	}
 
 	return expression.NewMod(args[0], args[1]), nil
+}
+
+type Pi struct{}
+
+func NewPi() sql.Expression {
+	return &Pi{}
+}
+
+var _ sql.FunctionExpression = &Pi{}
+var _ sql.CollationCoercible = &Pi{}
+
+// FunctionName implements sql.FunctionExpression
+func (p *Pi) FunctionName() string {
+	return "pi"
+}
+
+// Description implements sql.FunctionExpression
+func (p *Pi) Description() string {
+	return "return the value of pi."
+}
+
+// Resolved implements sql.Expression
+func (p *Pi) Resolved() bool {
+	return true
+}
+
+// String implements sql.Expression
+func (p *Pi) String() string {
+	return fmt.Sprintf("%s()", p.FunctionName())
+}
+
+// Type implements sql.Expression
+func (p *Pi) Type() sql.Type {
+	return types.Float64
+}
+
+// CollationCoercibility implements the interface sql.CollationCoercible.
+func (p *Pi) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+	return sql.Collation_binary, 5
+}
+
+// IsNullable implements sql.Expression
+func (p *Pi) IsNullable() bool {
+	return false
+}
+
+// Eval implements sql.Expression
+func (p *Pi) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	return math.Pi, nil
+}
+
+// Children implements sql.Expression
+func (p *Pi) Children() []sql.Expression {
+	return nil
+}
+
+// WithChildren implements sql.Expression
+func (p *Pi) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	return sql.NillaryWithChildren(p, children...)
+}
+
+type Exp struct {
+	*UnaryFunc
+}
+
+func NewExp(arg sql.Expression) sql.Expression {
+	return &Exp{NewUnaryFunc(arg, "EXP", types.Float64)}
+}
+
+var _ sql.FunctionExpression = (*Exp)(nil)
+var _ sql.CollationCoercible = (*Exp)(nil)
+
+// Description implements sql.FunctionExpression
+func (e *Exp) Description() string {
+	return "returns e raised to the power of the argument given."
+}
+
+// Type implements the Expression interface.
+func (e *Exp) Type() sql.Type {
+	return types.Float64
+}
+
+// CollationCoercibility implements the interface sql.CollationCoercible.
+func (e *Exp) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+	return sql.Collation_binary, 5
+}
+
+// Eval implements the Expression interface.
+func (e *Exp) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
+	if e.Child == nil {
+		return nil, nil
+	}
+
+	val, err := e.Child.Eval(ctx, row)
+	if err != nil {
+		return nil, err
+	}
+
+	if val == nil {
+		return nil, err
+	}
+
+	v, _, err := types.Float64.Convert(val)
+	if err != nil {
+		// TODO: truncate
+		ctx.Warn(1292, "Truncated incorrect DOUBLE value: '%v'", val)
+		v = 0.0
+	}
+
+	vv := v.(float64)
+	res := math.Exp(vv)
+
+	if math.IsNaN(res) || math.IsInf(res, 0) {
+		return nil, nil
+	}
+
+	return res, nil
+}
+
+// WithChildren implements the Expression interface.
+func (e *Exp) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	if len(children) != 1 {
+		return nil, sql.ErrInvalidChildrenNumber.New(e, len(children), 1)
+	}
+	return NewExp(children[0]), nil
 }

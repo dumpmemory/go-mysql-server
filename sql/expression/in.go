@@ -16,8 +16,7 @@ package expression
 
 import (
 	"fmt"
-
-	"github.com/cespare/xxhash"
+	"strconv"
 
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/types"
@@ -25,7 +24,7 @@ import (
 
 // InTuple is an expression that checks an expression is inside a list of expressions.
 type InTuple struct {
-	BinaryExpression
+	BinaryExpressionStub
 }
 
 // We implement Comparer because we have a Left() and a Right(), but we can't be Compare()d
@@ -46,28 +45,30 @@ func (*InTuple) CollationCoercibility(ctx *sql.Context) (collation sql.Collation
 }
 
 func (in *InTuple) Left() sql.Expression {
-	return in.BinaryExpression.Left
+	return in.BinaryExpressionStub.LeftChild
 }
 
 func (in *InTuple) Right() sql.Expression {
-	return in.BinaryExpression.Right
+	return in.BinaryExpressionStub.RightChild
 }
 
 // NewInTuple creates an InTuple expression.
 func NewInTuple(left sql.Expression, right sql.Expression) *InTuple {
-	return &InTuple{BinaryExpression{left, right}}
+	disableRounding(left)
+	disableRounding(right)
+	return &InTuple{BinaryExpressionStub{left, right}}
 }
 
 // Eval implements the Expression interface.
 func (in *InTuple) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	typ := in.Left().Type().Promote()
 	leftElems := types.NumColumns(typ)
-	left, err := in.Left().Eval(ctx, row)
+	originalLeft, err := in.Left().Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
 
-	if left == nil {
+	if originalLeft == nil {
 		return nil, nil
 	}
 
@@ -77,7 +78,7 @@ func (in *InTuple) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 	// also if no match is found in the list and one of the expressions in the list is NULL.
 	rightNull := false
 
-	left, err = typ.Convert(left)
+	left, _, err := typ.Convert(originalLeft)
 	if err != nil {
 		return nil, err
 	}
@@ -101,14 +102,31 @@ func (in *InTuple) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 				continue
 			}
 
-			right, err := convertOrTruncate(ctx, originalRight, typ)
-			if err != nil {
-				return nil, err
-			}
-
-			cmp, err := typ.Compare(left, right)
-			if err != nil {
-				return nil, err
+			var cmp int
+			elType := el.Type()
+			if types.IsDecimal(elType) || types.IsFloat(elType) {
+				rtyp := el.Type().Promote()
+				left, err := convertOrTruncate(ctx, left, rtyp)
+				if err != nil {
+					return nil, err
+				}
+				right, err := convertOrTruncate(ctx, originalRight, rtyp)
+				if err != nil {
+					return nil, err
+				}
+				cmp, err = rtyp.Compare(left, right)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				right, err := convertOrTruncate(ctx, originalRight, typ)
+				if err != nil {
+					return nil, err
+				}
+				cmp, err = typ.Compare(left, right)
+				if err != nil {
+					return nil, err
+				}
 			}
 
 			if cmp == 0 {
@@ -159,13 +177,14 @@ func NewNotInTuple(left sql.Expression, right sql.Expression) sql.Expression {
 
 // HashInTuple is an expression that checks an expression is inside a list of expressions using a hashmap.
 type HashInTuple struct {
-	InTuple
+	in      *InTuple
 	cmp     map[uint64]sql.Expression
 	hasNull bool
 }
 
-var _ Comparer = (*InTuple)(nil)
-var _ sql.CollationCoercible = (*InTuple)(nil)
+var _ Comparer = (*HashInTuple)(nil)
+var _ sql.CollationCoercible = (*HashInTuple)(nil)
+var _ sql.Expression = (*HashInTuple)(nil)
 
 // NewHashInTuple creates an InTuple expression.
 func NewHashInTuple(ctx *sql.Context, left, right sql.Expression) (*HashInTuple, error) {
@@ -179,7 +198,7 @@ func NewHashInTuple(ctx *sql.Context, left, right sql.Expression) (*HashInTuple,
 		return nil, err
 	}
 
-	return &HashInTuple{InTuple: *NewInTuple(left, right), cmp: cmp, hasNull: hasNull}, nil
+	return &HashInTuple{in: NewInTuple(left, right), cmp: cmp, hasNull: hasNull}, nil
 }
 
 // newInMap hashes static expressions in the right child Tuple of a InTuple node
@@ -193,20 +212,31 @@ func newInMap(ctx *sql.Context, right Tuple, lType sql.Type) (map[uint64]sql.Exp
 	lColumnCount := types.NumColumns(lType)
 
 	for _, el := range right {
-		rColumnCount := types.NumColumns(el.Type())
+		rType := el.Type().Promote()
+		rColumnCount := types.NumColumns(rType)
 		if rColumnCount != lColumnCount {
 			return nil, false, sql.ErrInvalidOperandColumns.New(lColumnCount, rColumnCount)
 		}
 
-		if el.Type() == types.Null {
+		if rType == types.Null {
 			hasNull = true
+			continue
 		}
 		i, err := el.Eval(ctx, sql.Row{})
 		if err != nil {
 			return nil, hasNull, err
 		}
+		if i == nil {
+			hasNull = true
+			continue
+		}
 
-		key, err := hashOfSimple(ctx, i, lType)
+		var key uint64
+		if types.IsDecimal(rType) || types.IsFloat(rType) {
+			key, err = hashOfSimple(ctx, i, rType)
+		} else {
+			key, err = hashOfSimple(ctx, i, lType)
+		}
 		if err != nil {
 			return nil, false, err
 		}
@@ -221,40 +251,63 @@ func hashOfSimple(ctx *sql.Context, i interface{}, t sql.Type) (uint64, error) {
 		return 0, nil
 	}
 
-	// Collated strings that are equivalent may have different runes, so we must make them hash to the same value
-	if types.IsTextOnly(t) {
-		if str, ok := i.(string); ok {
-			return t.(sql.StringType).Collation().HashToUint(str)
+	var str string
+	coll := sql.Collation_Default
+	if types.IsTuple(t) {
+		tup := i.([]interface{})
+		tupType := t.(types.TupleType)
+		hashes := make([]uint64, len(tup))
+		for idx, v := range tup {
+			h, err := hashOfSimple(ctx, v, tupType[idx])
+			if err != nil {
+				return 0, err
+			}
+			hashes[idx] = h
+		}
+		str = fmt.Sprintf("%v", hashes)
+	} else if types.IsTextOnly(t) {
+		coll = t.(sql.StringType).Collation()
+		if s, ok := i.(string); ok {
+			str = s
 		} else {
 			converted, err := convertOrTruncate(ctx, i, t)
 			if err != nil {
 				return 0, err
 			}
-			return t.(sql.StringType).Collation().HashToUint(converted.(string))
+			str = converted.(string)
 		}
 	} else {
-		hash := xxhash.New()
 		x, err := convertOrTruncate(ctx, i, t.Promote())
 		if err != nil {
 			return 0, err
 		}
 
-		if _, err := hash.Write([]byte(fmt.Sprintf("%v,", x))); err != nil {
-			return 0, err
+		// Remove trailing 0s from floats
+		switch v := x.(type) {
+		case float32:
+			str = strconv.FormatFloat(float64(v), 'f', -1, 32)
+			if str == "-0" {
+				str = "0"
+			}
+		case float64:
+			str = strconv.FormatFloat(v, 'f', -1, 64)
+			if str == "-0" {
+				str = "0"
+			}
+		default:
+			str = fmt.Sprintf("%v", v)
 		}
-		return hash.Sum64(), nil
 	}
+
+	// Collated strings that are equivalent may have different runes, so we must make them hash to the same value
+	return coll.HashToUint(str)
 }
 
 // Eval implements the Expression interface.
 func (hit *HashInTuple) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	if hit.hasNull {
-		return nil, nil
-	}
+	leftElems := types.NumColumns(hit.in.Left().Type().Promote())
 
-	leftElems := types.NumColumns(hit.Left().Type().Promote())
-
-	leftVal, err := hit.Left().Eval(ctx, row)
+	leftVal, err := hit.in.Left().Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -263,13 +316,16 @@ func (hit *HashInTuple) Eval(ctx *sql.Context, row sql.Row) (interface{}, error)
 		return nil, nil
 	}
 
-	key, err := hashOfSimple(ctx, leftVal, hit.Left().Type())
+	key, err := hashOfSimple(ctx, leftVal, hit.in.Left().Type())
 	if err != nil {
 		return nil, err
 	}
 
 	right, ok := hit.cmp[key]
 	if !ok {
+		if hit.hasNull {
+			return nil, nil
+		}
 		return false, nil
 	}
 
@@ -285,7 +341,7 @@ func (hit *HashInTuple) Eval(ctx *sql.Context, row sql.Row) (interface{}, error)
 // value is truncated to the Zero value for type |t|. If the value does not convert and the type is not automatically
 // coerced, then an error is returned.
 func convertOrTruncate(ctx *sql.Context, i interface{}, t sql.Type) (interface{}, error) {
-	converted, err := t.Convert(i)
+	converted, _, err := t.Convert(i)
 	if err == nil {
 		return converted, nil
 	}
@@ -309,18 +365,64 @@ func convertOrTruncate(ctx *sql.Context, i interface{}, t sql.Type) (interface{}
 		Message: fmt.Sprintf("Truncated incorrect %s value: %v", t.String(), i),
 		Code:    1292,
 	}
-	ctx.Session.Warn(&warning)
+
+	if ctx != nil && ctx.Session != nil {
+		ctx.Session.Warn(&warning)
+	}
+
 	return t.Zero(), nil
 }
 
+func (hit *HashInTuple) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
+	return hit.in.CollationCoercibility(ctx)
+}
+
+func (hit *HashInTuple) Resolved() bool {
+	return hit.in.Resolved()
+}
+
+func (hit *HashInTuple) Type() sql.Type {
+	return hit.in.Type()
+}
+
+func (hit *HashInTuple) IsNullable() bool {
+	return hit.in.IsNullable()
+}
+
+func (hit *HashInTuple) Children() []sql.Expression {
+	return hit.in.Children()
+}
+
+func (hit *HashInTuple) WithChildren(children ...sql.Expression) (sql.Expression, error) {
+	if len(children) != 2 {
+		return nil, sql.ErrInvalidChildrenNumber.New(hit, len(children), 2)
+	}
+	ret := *hit
+	newIn, err := ret.in.WithChildren(children...)
+	ret.in = newIn.(*InTuple)
+	return &ret, err
+}
+
+func (hit *HashInTuple) Compare(ctx *sql.Context, row sql.Row) (int, error) {
+	return hit.in.Compare(ctx, row)
+}
+
+func (hit *HashInTuple) Left() sql.Expression {
+	return hit.in.Left()
+}
+
+func (hit *HashInTuple) Right() sql.Expression {
+	return hit.in.Right()
+}
+
 func (hit *HashInTuple) String() string {
-	return fmt.Sprintf("(%s HASH IN %s)", hit.Left(), hit.Right())
+	return fmt.Sprintf("(%s HASH IN %s)", hit.in.Left(), hit.in.Right())
 }
 
 func (hit *HashInTuple) DebugString() string {
 	pr := sql.NewTreePrinter()
 	_ = pr.WriteNode("HashIn")
-	children := []string{sql.DebugString(hit.Left()), sql.DebugString(hit.Right())}
+	children := []string{sql.DebugString(hit.in.Left()), sql.DebugString(hit.in.Right())}
 	_ = pr.WriteChildren(children...)
 	return pr.String()
 }

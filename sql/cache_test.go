@@ -15,6 +15,7 @@
 package sql
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,14 +34,14 @@ func TestLRUCache(t *testing.T) {
 
 		_, err = cache.Get(2)
 		require.Error(err)
-		require.True(ErrKeyNotFound.Is(err))
+		require.True(errors.Is(err, ErrKeyNotFound))
 
 		// Free the cache and check previous entry disappeared.
 		cache.Free()
 
 		_, err = cache.Get(1)
 		require.Error(err)
-		require.True(ErrKeyNotFound.Is(err))
+		require.True(errors.Is(err, ErrKeyNotFound))
 
 		cache.Dispose()
 		require.Panics(func() {
@@ -55,7 +56,7 @@ func TestLRUCache(t *testing.T) {
 		require.NoError(cache.Put(1, "foo"))
 		_, err := cache.Get(1)
 		require.Error(err)
-		require.True(ErrKeyNotFound.Is(err))
+		require.True(errors.Is(err, ErrKeyNotFound))
 	})
 
 	t.Run("free required to add entry", func(t *testing.T) {
@@ -94,7 +95,7 @@ func TestHistoryCache(t *testing.T) {
 
 		_, err = cache.Get(2)
 		require.Error(err)
-		require.True(ErrKeyNotFound.Is(err))
+		require.True(errors.Is(err, ErrKeyNotFound))
 
 		cache.Dispose()
 		require.Panics(func() {
@@ -174,5 +175,35 @@ func TestRowsCache(t *testing.T) {
 		require.NoError(cache.Add(Row{1, "foo"}))
 		require.Len(cache.Get(), 1)
 		require.True(freed)
+	})
+}
+
+func BenchmarkHashOf(b *testing.B) {
+	row := NewRow(1, "1")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sum, err := HashOf(row)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if sum != 11268758894040352165 {
+			b.Fatalf("got %v", sum)
+		}
+	}
+}
+
+func BenchmarkParallelHashOf(b *testing.B) {
+	row := NewRow(1, "1")
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			sum, err := HashOf(row)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if sum != 11268758894040352165 {
+				b.Fatalf("got %v", sum)
+			}
+		}
 	})
 }

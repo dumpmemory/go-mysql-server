@@ -44,11 +44,11 @@ func NewSystemDoubleType(varName string, lowerbound, upperbound float64) sql.Sys
 
 // Compare implements Type interface.
 func (t systemDoubleType) Compare(a interface{}, b interface{}) (int, error) {
-	as, err := t.Convert(a)
+	as, _, err := t.Convert(a)
 	if err != nil {
 		return 0, err
 	}
-	bs, err := t.Convert(b)
+	bs, _, err := t.Convert(b)
 	if err != nil {
 		return 0, err
 	}
@@ -65,7 +65,7 @@ func (t systemDoubleType) Compare(a interface{}, b interface{}) (int, error) {
 }
 
 // Convert implements Type interface.
-func (t systemDoubleType) Convert(v interface{}) (interface{}, error) {
+func (t systemDoubleType) Convert(v interface{}) (interface{}, sql.ConvertInRange, error) {
 	// String nor nil values are accepted
 	switch value := v.(type) {
 	case int:
@@ -92,7 +92,7 @@ func (t systemDoubleType) Convert(v interface{}) (interface{}, error) {
 		return t.Convert(float64(value))
 	case float64:
 		if value >= t.lowerbound && value <= t.upperbound {
-			return value, nil
+			return value, sql.InRange, nil
 		}
 	case decimal.Decimal:
 		f, _ := value.Float64()
@@ -102,14 +102,19 @@ func (t systemDoubleType) Convert(v interface{}) (interface{}, error) {
 			f, _ := value.Decimal.Float64()
 			return t.Convert(f)
 		}
+	case string:
+		f, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			return t.Convert(f)
+		}
 	}
 
-	return nil, sql.ErrInvalidSystemVariableValue.New(t.varName, v)
+	return nil, sql.OutOfRange, sql.ErrInvalidSystemVariableValue.New(t.varName, v)
 }
 
 // MustConvert implements the Type interface.
 func (t systemDoubleType) MustConvert(v interface{}) interface{} {
-	value, err := t.Convert(v)
+	value, _, err := t.Convert(v)
 	if err != nil {
 		panic(err)
 	}
@@ -125,9 +130,8 @@ func (t systemDoubleType) Equals(otherType sql.Type) bool {
 }
 
 // MaxTextResponseByteLength implements the Type interface
-func (t systemDoubleType) MaxTextResponseByteLength() uint32 {
-	// system types are not sent directly across the wire
-	return 0
+func (t systemDoubleType) MaxTextResponseByteLength(ctx *sql.Context) uint32 {
+	return t.UnderlyingType().MaxTextResponseByteLength(ctx)
 }
 
 // Promote implements the Type interface.
@@ -141,7 +145,7 @@ func (t systemDoubleType) SQL(ctx *sql.Context, dest []byte, v interface{}) (sql
 		return sqltypes.NULL, nil
 	}
 
-	v, err := t.Convert(v)
+	v, _, err := t.Convert(v)
 	if err != nil {
 		return sqltypes.Value{}, err
 	}
@@ -197,4 +201,8 @@ func (t systemDoubleType) DecodeValue(val string) (interface{}, error) {
 		return parsedVal, nil
 	}
 	return nil, sql.ErrSystemVariableCodeFail.New(val, t.String())
+}
+
+func (t systemDoubleType) UnderlyingType() sql.Type {
+	return Float64
 }

@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"github.com/dolthub/go-mysql-server/sql"
-	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 // IfConditional represents IF statements only.
@@ -39,6 +38,10 @@ func NewIfConditional(condition sql.Expression, body sql.Node) *IfConditional {
 		Condition: condition,
 		Body:      body,
 	}
+}
+
+func (ic *IfConditional) IsReadOnly() bool {
+	return ic.Body.IsReadOnly()
 }
 
 // Resolved implements the sql.Node interface.
@@ -83,11 +86,6 @@ func (ic *IfConditional) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return &nic, nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (ic *IfConditional) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return ic.Body.CheckPrivileges(ctx, opChecker)
-}
-
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (ic *IfConditional) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	return sql.GetCoercibility(ctx, ic.Body)
@@ -109,11 +107,6 @@ func (ic *IfConditional) WithExpressions(exprs ...sql.Expression) (sql.Node, err
 	return &nic, nil
 }
 
-// RowIter implements the sql.Node interface.
-func (ic *IfConditional) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	return ic.Body.RowIter(ctx, row)
-}
-
 // implementsRepresentsBlock implements the RepresentsBlock interface.
 func (ic *IfConditional) implementsRepresentsBlock() {}
 
@@ -123,7 +116,6 @@ type IfElseBlock struct {
 	Else           sql.Node
 }
 
-var _ sql.Node = (*IfElseBlock)(nil)
 var _ sql.CollationCoercible = (*IfElseBlock)(nil)
 var _ sql.DebugStringer = (*IfElseBlock)(nil)
 var _ RepresentsBlock = (*IfElseBlock)(nil)
@@ -144,6 +136,15 @@ func (ieb *IfElseBlock) Resolved() bool {
 		}
 	}
 	return ieb.Else.Resolved()
+}
+
+func (ieb *IfElseBlock) IsReadOnly() bool {
+	for _, s := range ieb.IfConditionals {
+		if !s.IsReadOnly() {
+			return false
+		}
+	}
+	return ieb.Else.IsReadOnly()
 }
 
 // String implements the sql.Node interface.
@@ -184,7 +185,8 @@ func (ieb *IfElseBlock) DebugString() string {
 
 // Schema implements the sql.Node interface.
 func (ieb *IfElseBlock) Schema() sql.Schema {
-	return nil
+	// NOTE: nil schema causes no result for over the wire clients
+	return emptySch
 }
 
 // Children implements the sql.Node interface.
@@ -213,19 +215,6 @@ func (ieb *IfElseBlock) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NewIfElse(ifConditionals, children[len(children)-1]), nil
 }
 
-// CheckPrivileges implements the interface sql.Node.
-func (ieb *IfElseBlock) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	for _, ifBlock := range ieb.IfConditionals {
-		if !ifBlock.CheckPrivileges(ctx, opChecker) {
-			return false
-		}
-	}
-	if ieb.Else != nil {
-		return ieb.Else.CheckPrivileges(ctx, opChecker)
-	}
-	return true
-}
-
 // CollationCoercibility implements the interface sql.CollationCoercible.
 func (ieb *IfElseBlock) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID, coercibility byte) {
 	// We'll only be able to know which branch was taken during the RowIter, so we can't rely on that here.
@@ -233,88 +222,5 @@ func (ieb *IfElseBlock) CollationCoercibility(ctx *sql.Context) (collation sql.C
 	return sql.Collation_binary, 7
 }
 
-// RowIter implements the sql.Node interface.
-func (ieb *IfElseBlock) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	var branchIter sql.RowIter
-
-	var err error
-	for _, ifConditional := range ieb.IfConditionals {
-		condition, err := ifConditional.Condition.Eval(ctx, row)
-		if err != nil {
-			return nil, err
-		}
-		var passedCondition bool
-		if condition != nil {
-			passedCondition, err = types.ConvertToBool(condition)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if !passedCondition {
-			continue
-		}
-
-		branchIter, err = ifConditional.RowIter(ctx, row)
-		if err != nil {
-			return nil, err
-		}
-		// If the branchIter is already a block iter, then we don't need to construct our own, as its contained
-		// node and schema will be a better representation of the iterated rows.
-		if blockRowIter, ok := branchIter.(BlockRowIter); ok {
-			return blockRowIter, nil
-		}
-		return &ifElseIter{
-			branchIter: branchIter,
-			sch:        ifConditional.Body.Schema(),
-			branchNode: ifConditional.Body,
-		}, nil
-	}
-
-	// All conditions failed so we run the else
-	branchIter, err = ieb.Else.RowIter(ctx, row)
-	if err != nil {
-		return nil, err
-	}
-	// If the branchIter is already a block iter, then we don't need to construct our own, as its contained
-	// node and schema will be a better representation of the iterated rows.
-	if blockRowIter, ok := branchIter.(BlockRowIter); ok {
-		return blockRowIter, nil
-	}
-	return &ifElseIter{
-		branchIter: branchIter,
-		sch:        ieb.Else.Schema(),
-		branchNode: ieb.Else,
-	}, nil
-}
-
 // implementsRepresentsBlock implements the RepresentsBlock interface.
 func (ieb *IfElseBlock) implementsRepresentsBlock() {}
-
-// ifElseIter is the row iterator for *IfElseBlock.
-type ifElseIter struct {
-	branchIter sql.RowIter
-	sch        sql.Schema
-	branchNode sql.Node
-}
-
-var _ BlockRowIter = (*ifElseIter)(nil)
-
-// Next implements the sql.RowIter interface.
-func (i *ifElseIter) Next(ctx *sql.Context) (sql.Row, error) {
-	return i.branchIter.Next(ctx)
-}
-
-// Close implements the sql.RowIter interface.
-func (i *ifElseIter) Close(ctx *sql.Context) error {
-	return i.branchIter.Close(ctx)
-}
-
-// RepresentingNode implements the sql.BlockRowIter interface.
-func (i *ifElseIter) RepresentingNode() sql.Node {
-	return i.branchNode
-}
-
-// Schema implements the sql.BlockRowIter interface.
-func (i *ifElseIter) Schema() sql.Schema {
-	return i.sch
-}

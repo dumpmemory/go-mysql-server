@@ -40,11 +40,11 @@ func NewSystemStringType(varName string) sql.SystemVariableType {
 
 // Compare implements Type interface.
 func (t systemStringType) Compare(a interface{}, b interface{}) (int, error) {
-	as, err := t.Convert(a)
+	as, _, err := t.Convert(a)
 	if err != nil {
 		return 0, err
 	}
-	bs, err := t.Convert(b)
+	bs, _, err := t.Convert(b)
 	if err != nil {
 		return 0, err
 	}
@@ -61,20 +61,20 @@ func (t systemStringType) Compare(a interface{}, b interface{}) (int, error) {
 }
 
 // Convert implements Type interface.
-func (t systemStringType) Convert(v interface{}) (interface{}, error) {
+func (t systemStringType) Convert(v interface{}) (interface{}, sql.ConvertInRange, error) {
 	if v == nil {
-		return "", nil
+		return "", sql.InRange, nil
 	}
 	if value, ok := v.(string); ok {
-		return value, nil
+		return value, sql.InRange, nil
 	}
 
-	return nil, sql.ErrInvalidSystemVariableValue.New(t.varName, v)
+	return nil, sql.OutOfRange, sql.ErrInvalidSystemVariableValue.New(t.varName, v)
 }
 
 // MustConvert implements the Type interface.
 func (t systemStringType) MustConvert(v interface{}) interface{} {
-	value, err := t.Convert(v)
+	value, _, err := t.Convert(v)
 	if err != nil {
 		panic(err)
 	}
@@ -90,9 +90,8 @@ func (t systemStringType) Equals(otherType sql.Type) bool {
 }
 
 // MaxTextResponseByteLength implements the Type interface
-func (t systemStringType) MaxTextResponseByteLength() uint32 {
-	// system types are not sent directly across the wire
-	return 0
+func (t systemStringType) MaxTextResponseByteLength(ctx *sql.Context) uint32 {
+	return t.UnderlyingType().MaxTextResponseByteLength(ctx)
 }
 
 // Promote implements the Type interface.
@@ -106,7 +105,7 @@ func (t systemStringType) SQL(ctx *sql.Context, dest []byte, v interface{}) (sql
 		return sqltypes.NULL, nil
 	}
 
-	v, err := t.Convert(v)
+	v, _, err := t.Convert(v)
 	if err != nil {
 		return sqltypes.Value{}, err
 	}
@@ -153,4 +152,8 @@ func (t systemStringType) EncodeValue(val interface{}) (string, error) {
 // DecodeValue implements SystemVariableType interface.
 func (t systemStringType) DecodeValue(val string) (interface{}, error) {
 	return val, nil
+}
+
+func (t systemStringType) UnderlyingType() sql.Type {
+	return LongText
 }

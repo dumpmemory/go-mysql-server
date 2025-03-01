@@ -30,6 +30,10 @@ type ForeignKeyHandler struct {
 	AllUpdaters  []sql.ForeignKeyEditor
 }
 
+func (n *ForeignKeyHandler) Underlying() sql.Table {
+	return n.Table
+}
+
 var _ sql.Node = (*ForeignKeyHandler)(nil)
 var _ sql.CollationCoercible = (*ForeignKeyHandler)(nil)
 var _ sql.Table = (*ForeignKeyHandler)(nil)
@@ -41,6 +45,7 @@ var _ sql.TableEditor = (*ForeignKeyHandler)(nil)
 var _ sql.RowInserter = (*ForeignKeyHandler)(nil)
 var _ sql.RowUpdater = (*ForeignKeyHandler)(nil)
 var _ sql.RowDeleter = (*ForeignKeyHandler)(nil)
+var _ sql.TableWrapper = (*ForeignKeyHandler)(nil)
 
 // Resolved implements the interface sql.Node.
 func (n *ForeignKeyHandler) Resolved() bool {
@@ -61,6 +66,11 @@ func (n *ForeignKeyHandler) Schema() sql.Schema {
 	return n.OriginalNode.Schema()
 }
 
+func (n *ForeignKeyHandler) IsReadOnly() bool {
+	// false?
+	return n.OriginalNode.IsReadOnly()
+}
+
 // Collation implements the interface sql.Node.
 func (n *ForeignKeyHandler) Collation() sql.CollationID {
 	originalTable, ok := n.OriginalNode.(sql.Table)
@@ -75,11 +85,6 @@ func (n *ForeignKeyHandler) Children() []sql.Node {
 	return []sql.Node{n.OriginalNode}
 }
 
-// RowIter implements the interface sql.Node.
-func (n *ForeignKeyHandler) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	return n.OriginalNode.RowIter(ctx, row)
-}
-
 // WithChildren implements the interface sql.Node.
 func (n *ForeignKeyHandler) WithChildren(children ...sql.Node) (sql.Node, error) {
 	if len(children) != 1 {
@@ -88,11 +93,6 @@ func (n *ForeignKeyHandler) WithChildren(children ...sql.Node) (sql.Node, error)
 	nn := *n
 	nn.OriginalNode = children[0]
 	return &nn, nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (n *ForeignKeyHandler) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return n.OriginalNode.CheckPrivileges(ctx, opChecker)
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

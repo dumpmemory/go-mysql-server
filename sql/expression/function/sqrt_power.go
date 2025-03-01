@@ -85,17 +85,22 @@ func (s *Sqrt) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	child, err = types.Float64.Convert(child)
+	child, _, err = types.Float64.Convert(child)
 	if err != nil {
 		return nil, err
 	}
 
-	return math.Sqrt(child.(float64)), nil
+	res := math.Sqrt(child.(float64))
+	if math.IsNaN(res) || math.IsInf(res, 0) {
+		return nil, nil
+	}
+
+	return res, nil
 }
 
 // Power is a function that returns value of X raised to the power of Y.
 type Power struct {
-	expression.BinaryExpression
+	expression.BinaryExpressionStub
 }
 
 var _ sql.FunctionExpression = (*Power)(nil)
@@ -104,9 +109,9 @@ var _ sql.CollationCoercible = (*Power)(nil)
 // NewPower creates a new Power expression.
 func NewPower(e1, e2 sql.Expression) sql.Expression {
 	return &Power{
-		expression.BinaryExpression{
-			Left:  e1,
-			Right: e2,
+		expression.BinaryExpressionStub{
+			LeftChild:  e1,
+			RightChild: e2,
 		},
 	}
 }
@@ -130,10 +135,10 @@ func (*Power) CollationCoercibility(ctx *sql.Context) (collation sql.CollationID
 }
 
 // IsNullable implements the Expression interface.
-func (p *Power) IsNullable() bool { return p.Left.IsNullable() || p.Right.IsNullable() }
+func (p *Power) IsNullable() bool { return p.LeftChild.IsNullable() || p.RightChild.IsNullable() }
 
 func (p *Power) String() string {
-	return fmt.Sprintf("power(%s, %s)", p.Left, p.Right)
+	return fmt.Sprintf("power(%s, %s)", p.LeftChild, p.RightChild)
 }
 
 // WithChildren implements the Expression interface.
@@ -146,7 +151,7 @@ func (p *Power) WithChildren(children ...sql.Expression) (sql.Expression, error)
 
 // Eval implements the Expression interface.
 func (p *Power) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
-	left, err := p.Left.Eval(ctx, row)
+	left, err := p.LeftChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -155,12 +160,12 @@ func (p *Power) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	left, err = types.Float64.Convert(left)
+	left, _, err = types.Float64.Convert(left)
 	if err != nil {
 		return nil, err
 	}
 
-	right, err := p.Right.Eval(ctx, row)
+	right, err := p.RightChild.Eval(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -169,10 +174,15 @@ func (p *Power) Eval(ctx *sql.Context, row sql.Row) (interface{}, error) {
 		return nil, nil
 	}
 
-	right, err = types.Float64.Convert(right)
+	right, _, err = types.Float64.Convert(right)
 	if err != nil {
 		return nil, err
 	}
 
-	return math.Pow(left.(float64), right.(float64)), nil
+	res := math.Pow(left.(float64), right.(float64))
+	if math.IsNaN(res) || math.IsInf(res, 0) {
+		return nil, nil
+	}
+
+	return res, nil
 }

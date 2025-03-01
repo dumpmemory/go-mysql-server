@@ -49,6 +49,10 @@ func (n *ShowPrivileges) Resolved() bool {
 	return true
 }
 
+func (n *ShowPrivileges) IsReadOnly() bool {
+	return true
+}
+
 // Children implements the interface sql.Node.
 func (n *ShowPrivileges) Children() []sql.Node {
 	return nil
@@ -60,11 +64,6 @@ func (n *ShowPrivileges) WithChildren(children ...sql.Node) (sql.Node, error) {
 		return nil, sql.ErrInvalidChildrenNumber.New(n, len(children), 0)
 	}
 	return n, nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (n *ShowPrivileges) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return true
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

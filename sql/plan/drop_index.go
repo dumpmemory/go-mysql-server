@@ -17,7 +17,6 @@ package plan
 import (
 	"gopkg.in/src-d/go-errors.v1"
 
-	"github.com/dolthub/go-mysql-server/internal/similartext"
 	"github.com/dolthub/go-mysql-server/sql"
 )
 
@@ -55,74 +54,13 @@ func (d *DropIndex) Database() string { return d.CurrentDatabase }
 // Resolved implements the Node interface.
 func (d *DropIndex) Resolved() bool { return d.Table.Resolved() }
 
+func (d *DropIndex) IsReadOnly() bool { return false }
+
 // Schema implements the Node interface.
 func (d *DropIndex) Schema() sql.Schema { return nil }
 
 // Children implements the Node interface.
 func (d *DropIndex) Children() []sql.Node { return []sql.Node{d.Table} }
-
-// RowIter implements the Node interface.
-func (d *DropIndex) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	db, err := d.Catalog.Database(ctx, d.CurrentDatabase)
-	if err != nil {
-		return nil, err
-	}
-
-	n, ok := d.Table.(sql.Nameable)
-	if !ok {
-		return nil, ErrTableNotNameable.New()
-	}
-
-	table, ok, err := db.GetTableInsensitive(ctx, n.Name())
-
-	if err != nil {
-		return nil, err
-	}
-
-	if !ok {
-		tableNames, err := db.GetTableNames(ctx)
-
-		if err != nil {
-			return nil, err
-		}
-
-		similar := similartext.Find(tableNames, n.Name())
-		return nil, sql.ErrTableNotFound.New(n.Name() + similar)
-	}
-
-	index := ctx.GetIndexRegistry().Index(db.Name(), d.Name)
-	if index == nil {
-		return nil, ErrIndexNotFound.New(d.Name, n.Name(), db.Name())
-	}
-	ctx.GetIndexRegistry().ReleaseIndex(index)
-
-	if !ctx.GetIndexRegistry().CanRemoveIndex(index) {
-		return nil, ErrIndexNotAvailable.New(d.Name)
-	}
-
-	done, err := ctx.GetIndexRegistry().DeleteIndex(db.Name(), d.Name, true)
-	if err != nil {
-		return nil, err
-	}
-
-	driver := ctx.GetIndexRegistry().IndexDriver(index.Driver())
-	if driver == nil {
-		return nil, ErrInvalidIndexDriver.New(index.Driver())
-	}
-
-	<-done
-
-	partitions, err := table.Partitions(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := driver.Delete(index, partitions); err != nil {
-		return nil, err
-	}
-
-	return sql.RowsToRowIter(), nil
-}
 
 func (d *DropIndex) String() string {
 	pr := sql.NewTreePrinter()
@@ -140,12 +78,6 @@ func (d *DropIndex) WithChildren(children ...sql.Node) (sql.Node, error) {
 	nd := *d
 	nd.Table = children[0]
 	return &nd, nil
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (d *DropIndex) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(GetDatabaseName(d.Table), getTableName(d.Table), "", sql.PrivilegeType_Index))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.

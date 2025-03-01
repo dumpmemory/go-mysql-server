@@ -18,11 +18,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dolthub/go-mysql-server/sql/types"
+
 	"github.com/dolthub/go-mysql-server/sql"
 )
 
 type DropProcedure struct {
-	db            sql.Database
+	Db            sql.Database
 	IfExists      bool
 	ProcedureName string
 }
@@ -34,7 +36,7 @@ var _ sql.CollationCoercible = (*DropProcedure)(nil)
 // NewDropProcedure creates a new *DropProcedure node.
 func NewDropProcedure(db sql.Database, procedureName string, ifExists bool) *DropProcedure {
 	return &DropProcedure{
-		db:            db,
+		Db:            db,
 		IfExists:      ifExists,
 		ProcedureName: strings.ToLower(procedureName),
 	}
@@ -42,8 +44,12 @@ func NewDropProcedure(db sql.Database, procedureName string, ifExists bool) *Dro
 
 // Resolved implements the sql.Node interface.
 func (d *DropProcedure) Resolved() bool {
-	_, ok := d.db.(sql.UnresolvedDatabase)
+	_, ok := d.Db.(sql.UnresolvedDatabase)
 	return !ok
+}
+
+func (d *DropProcedure) IsReadOnly() bool {
+	return false
 }
 
 // String implements the sql.Node interface.
@@ -57,7 +63,7 @@ func (d *DropProcedure) String() string {
 
 // Schema implements the sql.Node interface.
 func (d *DropProcedure) Schema() sql.Schema {
-	return nil
+	return types.OkResultSchema
 }
 
 // Children implements the sql.Node interface.
@@ -65,34 +71,9 @@ func (d *DropProcedure) Children() []sql.Node {
 	return nil
 }
 
-// RowIter implements the sql.Node interface.
-func (d *DropProcedure) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	procDb, ok := d.db.(sql.StoredProcedureDatabase)
-	if !ok {
-		if d.IfExists {
-			return sql.RowsToRowIter(), nil
-		} else {
-			return nil, sql.ErrStoredProceduresNotSupported.New(d.ProcedureName)
-		}
-	}
-	err := procDb.DropStoredProcedure(ctx, d.ProcedureName)
-	if d.IfExists && sql.ErrStoredProcedureDoesNotExist.Is(err) {
-		return sql.RowsToRowIter(), nil
-	} else if err != nil {
-		return nil, err
-	}
-	return sql.RowsToRowIter(), nil
-}
-
 // WithChildren implements the sql.Node interface.
 func (d *DropProcedure) WithChildren(children ...sql.Node) (sql.Node, error) {
 	return NillaryWithChildren(d, children...)
-}
-
-// CheckPrivileges implements the interface sql.Node.
-func (d *DropProcedure) CheckPrivileges(ctx *sql.Context, opChecker sql.PrivilegedOperationChecker) bool {
-	return opChecker.UserHasPrivileges(ctx,
-		sql.NewPrivilegedOperation(d.db.Name(), "", "", sql.PrivilegeType_AlterRoutine))
 }
 
 // CollationCoercibility implements the interface sql.CollationCoercible.
@@ -102,12 +83,12 @@ func (*DropProcedure) CollationCoercibility(ctx *sql.Context) (collation sql.Col
 
 // Database implements the sql.Databaser interface.
 func (d *DropProcedure) Database() sql.Database {
-	return d.db
+	return d.Db
 }
 
 // WithDatabase implements the sql.Databaser interface.
 func (d *DropProcedure) WithDatabase(db sql.Database) (sql.Node, error) {
 	nd := *d
-	nd.db = db
+	nd.Db = db
 	return &nd, nil
 }
