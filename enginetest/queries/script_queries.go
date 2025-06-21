@@ -8684,6 +8684,70 @@ where
 			},
 		},
 	},
+	{
+		Name:    "substring function tests with wrappers",
+		Dialect: "mysql",
+		SetUpScript: []string{
+			"create table tbl (t text);",
+			"insert into tbl values ('abcdef');",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select left(t, 3) from tbl;",
+				Expected: []sql.Row{
+					{"abc"},
+				},
+			},
+			{
+				Query: "select right(t, 3) from tbl;",
+				Expected: []sql.Row{
+					{"def"},
+				},
+			},
+			{
+				Query: "select instr(t, 'bcd') from tbl;",
+				Expected: []sql.Row{
+					{2},
+				},
+			},
+		},
+	},
+	{
+		Name: "tinyint column does not restrict IF or IFNULL output",
+		// https://github.com/dolthub/dolt/issues/9321
+		SetUpScript: []string{
+			"create table t0 (c0 tinyint);",
+			"insert into t0 values (null);",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select ifnull(t0.c0, 128) as ref0 from t0",
+				Expected: []sql.Row{
+					{128},
+				},
+			},
+			{
+				Query:    "select if(t0.c0 = 1, t0.c0, 128) as ref0 from t0",
+				Expected: []sql.Row{{128}},
+			},
+		},
+	},
+	{
+		Name:    "subquery with case insensitive collation",
+		Dialect: "mysql",
+		SetUpScript: []string{
+			"create table tbl (t text) collate=utf8mb4_0900_ai_ci;",
+			"insert into tbl values ('abcdef');",
+		},
+		Assertions: []ScriptTestAssertion{
+			{
+				Query: "select 'AbCdEf' in (select t from tbl);",
+				Expected: []sql.Row{
+					{true},
+				},
+			},
+		},
+	},
 }
 
 var SpatialScriptTests = []ScriptTest{
